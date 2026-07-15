@@ -1,0 +1,3 @@
+```json
+{"persona":"prover","verdict":"approve","summary":"Checked the pagination math; it holds.","findings":[{"severity":"info","file":null,"line":null,"title":"Verified page-boundary arithmetic","detail":"Walked offset and limit through empty, single-page, and exact-multiple row counts; no boundary produces a duplicate or a gap.","fix":null}]}
+```

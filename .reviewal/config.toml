@@ -1,0 +1,3 @@
+# reviewal project config
+# model = "opus"        # default: claude CLI's own default model
+# timeout_secs = 600

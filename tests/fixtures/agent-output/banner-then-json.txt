@@ -1,0 +1,4 @@
+reviewal agent bootstrap
+model: default | tools: none | session persistence: off
+-- streaming response --
+{"persona":"prover","verdict":"reject","summary":"The cache key omits the tenant, so responses leak across tenants.","findings":[{"severity":"critical","file":"src/cache.rs","line":88,"title":"Cache key omits tenant id","detail":"lookup() hashes only the request path. Two tenants requesting /reports/monthly share one entry, so the second reader receives the first tenant's rendered report.","fix":"Fold the tenant id into the cache key."}]}

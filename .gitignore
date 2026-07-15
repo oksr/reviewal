@@ -1,0 +1,7 @@
+.claude/skills/
+.reviewal/runs/
+.agents/
+/target
+skills-lock.json
+review-tasks/
+.DS_Store
