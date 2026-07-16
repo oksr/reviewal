@@ -12,6 +12,10 @@ installers = ["shell"]
 # Where the shell installer puts the binary — most users won't have Rust,
 # so prefer ~/.local/bin over the dist default of ~/.cargo/bin
 install-path = ["$XDG_BIN_HOME/", "$XDG_DATA_HOME/../bin", "~/.local/bin"]
+# .tar.gz over the .tar.xz default: gzip is on every system, xz often isn't
+unix-archive = ".tar.gz"
 # Target platforms to build apps for (Rust target-triple syntax)
 # (no Windows: the $EDITOR shell-out runs through `sh -c`)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# Linux targets are musl so the binaries are fully static — no glibc floor,
+# runs on any distro including Alpine, RHEL 9, Debian 11
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-musl"]
