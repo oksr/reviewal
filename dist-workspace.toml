@@ -9,6 +9,9 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["shell"]
+# Where the shell installer puts the binary — most users won't have Rust,
+# so prefer ~/.local/bin over the dist default of ~/.cargo/bin
+install-path = ["$XDG_BIN_HOME/", "$XDG_DATA_HOME/../bin", "~/.local/bin"]
 # Target platforms to build apps for (Rust target-triple syntax)
 # (no Windows: the $EDITOR shell-out runs through `sh -c`)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
