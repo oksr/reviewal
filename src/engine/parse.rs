@@ -18,8 +18,7 @@ pub(crate) fn extract_json(stdout: &str) -> Result<Value, ParseError> {
     // stream deserializer reads exactly one complete value — interior braces,
     // escaped quotes, and prose go through a real parser, not a scanner.
     for (idx, _) in stdout.match_indices('{') {
-        let mut stream =
-            serde_json::Deserializer::from_str(&stdout[idx..]).into_iter::<Value>();
+        let mut stream = serde_json::Deserializer::from_str(&stdout[idx..]).into_iter::<Value>();
         if let Some(Ok(v)) = stream.next() {
             return Ok(peel(v));
         }
@@ -139,8 +138,7 @@ mod tests {
     fn escaped_quotes_inside_strings_survive_the_hunt() {
         // Leading prose defeats the whole-document parse; the \" inside
         // "detail" is content, and the } after it must not close the object.
-        let v = extract_json("boot }\n{\"persona\":\"prover\",\"detail\":\"a \\\" b }\"}")
-            .unwrap();
+        let v = extract_json("boot }\n{\"persona\":\"prover\",\"detail\":\"a \\\" b }\"}").unwrap();
         assert_eq!(v["detail"], "a \" b }");
     }
 
@@ -172,7 +170,11 @@ mod tests {
     fn long_garbage_preview_is_clipped() {
         let noise = "x".repeat(2_000);
         let err = extract_json(&noise).unwrap_err();
-        assert!(err.0.len() < 700, "preview not clipped: {} bytes", err.0.len());
+        assert!(
+            err.0.len() < 700,
+            "preview not clipped: {} bytes",
+            err.0.len()
+        );
         assert!(err.0.contains('…'));
     }
 }

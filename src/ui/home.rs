@@ -1,12 +1,12 @@
 use crate::engine::store::{RunRecord, RunStatus};
-use crate::engine::target::DetectedTarget;
+use crate::engine::target::{DetectedTarget, Target};
 use crate::ui::app::{ClaudeCheck, Transition};
 use crate::ui::theme::Theme;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Padding, Paragraph};
 use ratatui::Frame;
 
 pub(crate) enum HomeZone {
@@ -171,17 +171,26 @@ pub(crate) fn draw(
     let warn_height = state.warnings.len() as u16;
     let tip_height = u16::from(!state.skill_installed);
 
-    let [header, _gap, launcher, defaults, history, tip, warn_area, hints] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(launcher_height),
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(tip_height),
-        Constraint::Length(warn_height),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    // The history box hugs its rows; leftover space collects in the filler
+    // below it, so the hints stay bottom-anchored without an empty frame
+    // stretching down the screen.
+    let fixed = 1 + 1 + launcher_height + 1 + tip_height + warn_height + 1;
+    let history_avail = area.height.saturating_sub(fixed).max(3);
+    let history_height = (state.runs.len().max(1) as u16 + 2).min(history_avail);
+
+    let [header, _gap, launcher, defaults, history, _filler, tip, warn_area, hints] =
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(launcher_height),
+            Constraint::Length(1),
+            Constraint::Length(history_height),
+            Constraint::Min(0),
+            Constraint::Length(tip_height),
+            Constraint::Length(warn_height),
+            Constraint::Length(1),
+        ])
+        .areas(area);
 
     draw_header(f, header, claude_check, model_label, theme);
     draw_launcher(f, launcher, state, theme);
@@ -219,7 +228,7 @@ fn draw_header(
     theme: &Theme,
 ) {
     f.render_widget(
-        Paragraph::new(Line::styled("reviewal", theme.title_style())),
+        Paragraph::new(Line::styled("\u{2726} reviewal", theme.title_style())),
         area,
     );
     let (text, style) = match claude_check {
@@ -242,42 +251,53 @@ fn draw_header(
     );
 }
 
-fn selectable_row(content: String, selected: bool, width: u16, theme: &Theme) -> Line<'static> {
+/// Assembles a launcher row: a pointer gutter, the content spans, and — when
+/// selected — the quick-start hint right-aligned, all under the selection
+/// tint so per-span colors survive.
+fn selectable_row(
+    content: Vec<Span<'static>>,
+    selected: bool,
+    width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(content.len() + 3);
+    spans.push(if selected {
+        Span::styled(
+            "\u{276f} ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("  ")
+    });
+    spans.extend(content);
     if !selected {
-        return Line::raw(content);
+        return Line::from(spans);
     }
-    let base = Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::REVERSED);
     const SUFFIX: &str = "enter starts with defaults";
     let width = width as usize;
-    let content_len = content.chars().count();
-    if content_len + 1 + SUFFIX.chars().count() <= width {
-        let pad = width - SUFFIX.chars().count();
-        Line::from(vec![
-            Span::styled(format!("{content:<pad$}"), base),
-            Span::styled(SUFFIX, theme.dim_style()),
-        ])
-    } else {
-        Line::styled(content, base)
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if used + 1 + SUFFIX.chars().count() <= width {
+        spans.push(Span::raw(" ".repeat(width - used - SUFFIX.chars().count())));
+        spans.push(Span::styled(SUFFIX, theme.dim_style()));
+    } else if width > used {
+        spans.push(Span::raw(" ".repeat(width - used)));
     }
+    let sel = theme.selection_style();
+    Line::from(
+        spans
+            .into_iter()
+            .map(|s| Span::styled(s.content, s.style.patch(sel)))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn draw_launcher(f: &mut Frame, area: Rect, state: &HomeState, theme: &Theme) {
     let focused = matches!(state.zone, HomeZone::Launcher);
-    let border_style = if focused {
-        Style::default().fg(theme.accent)
-    } else {
-        theme.dim_style()
-    };
-    let title_style = if focused {
-        theme.title_style()
-    } else {
-        theme.dim_style()
-    };
-    let block = Block::bordered()
-        .title(Span::styled("start a review", title_style))
-        .border_style(border_style);
+    let block = theme
+        .panel("start a review", focused)
+        .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -290,13 +310,19 @@ fn draw_launcher(f: &mut Frame, area: Rect, state: &HomeState, theme: &Theme) {
     } else {
         for (i, t) in state.targets.iter().enumerate() {
             let selected = focused && state.launcher_idx == i;
-            let content = format!(
-                "\u{25b8} {} — {} files · +{} \u{2212}{}",
-                t.label,
-                t.files.len(),
-                t.additions,
-                t.deletions
-            );
+            let content = vec![
+                Span::raw(t.label.clone()),
+                Span::styled(format!(" — {} files · ", t.files.len()), theme.dim_style()),
+                Span::styled(
+                    format!("+{}", t.additions),
+                    Style::default().fg(theme.status_done),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("\u{2212}{}", t.deletions),
+                    Style::default().fg(theme.error),
+                ),
+            ];
             lines.push(selectable_row(content, selected, inner.width, theme));
             if selected {
                 let names: Vec<&str> = t.files.iter().take(3).map(String::as_str).collect();
@@ -308,7 +334,13 @@ fn draw_launcher(f: &mut Frame, area: Rect, state: &HomeState, theme: &Theme) {
         }
         let spec_idx = state.targets.len();
         let selected = focused && state.launcher_idx == spec_idx;
-        let content = format!("\u{25b8} spec files… — {} *.md in repo", state.spec_count);
+        let content = vec![
+            Span::raw("spec files\u{2026}"),
+            Span::styled(
+                format!(" — {} *.md in repo", state.spec_count),
+                theme.dim_style(),
+            ),
+        ];
         lines.push(selectable_row(content, selected, inner.width, theme));
     }
     f.render_widget(Paragraph::new(lines), inner);
@@ -322,7 +354,9 @@ fn draw_defaults(f: &mut Frame, area: Rect, state: &HomeState, theme: &Theme) {
     } else {
         &state.defaults_code
     };
-    let mut spans = vec![Span::styled(" Personas: ", theme.dim_style())];
+    // Indent under the launcher's border + padding + pointer gutter so the
+    // line reads as a footnote to the row above it.
+    let mut spans = vec![Span::styled("    Personas: ", theme.dim_style())];
     for (i, name) in names.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", theme.dim_style()));
@@ -338,21 +372,35 @@ fn draw_defaults(f: &mut Frame, area: Rect, state: &HomeState, theme: &Theme) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Display columns for the target text in a history row.
+const TARGET_COLS: usize = 28;
+
+/// The run's target, stripped of the `spec:`/`diff` word that now lives in
+/// the kind column; spec paths keep their tail, diff descriptions their head.
+fn target_text(r: &RunRecord) -> String {
+    match &r.target {
+        Target::SpecFiles(_) => {
+            let rest = r
+                .target_desc
+                .strip_prefix("spec: ")
+                .unwrap_or(&r.target_desc);
+            crate::ui::format::truncate_path_start(rest, TARGET_COLS)
+        }
+        Target::GitDiff { .. } => {
+            let rest = r
+                .target_desc
+                .strip_prefix("diff ")
+                .unwrap_or(&r.target_desc);
+            crate::ui::format::truncate_end(rest, TARGET_COLS)
+        }
+    }
+}
+
 fn draw_history(f: &mut Frame, area: Rect, state: &HomeState, theme: &Theme) {
     let focused = matches!(state.zone, HomeZone::History);
-    let border_style = if focused {
-        Style::default().fg(theme.accent)
-    } else {
-        theme.dim_style()
-    };
-    let title_style = if focused {
-        theme.title_style()
-    } else {
-        theme.dim_style()
-    };
-    let block = Block::bordered()
-        .title(Span::styled("history", title_style))
-        .border_style(border_style);
+    let block = theme
+        .panel("history", focused)
+        .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -367,16 +415,42 @@ fn draw_history(f: &mut Frame, area: Rect, state: &HomeState, theme: &Theme) {
         for (i, r) in state.runs.iter().enumerate() {
             let selected = focused && state.history_idx == i;
             let rel = crate::ui::format::relative_time(&r.created_at, now);
-            let target_desc: String = r.target_desc.chars().take(28).collect();
-            let prefix = format!("{rel:<11}{target_desc:<29}");
-            let avail = (inner.width as usize).saturating_sub(prefix.chars().count());
-            let mut spans = vec![Span::raw(prefix)];
+            let kind = match &r.target {
+                Target::SpecFiles(_) => "spec",
+                Target::GitDiff { .. } => "diff",
+            };
+            // Dead runs recede entirely; the eye should land on finished work.
+            let muted = matches!(r.status, RunStatus::Aborted | RunStatus::Stale);
+            let target_style = if muted {
+                theme.dim_style()
+            } else {
+                Style::default()
+            };
+            let mut spans = vec![
+                if selected {
+                    Span::styled("\u{258c} ", theme.accent_style())
+                } else {
+                    Span::raw("  ")
+                },
+                Span::styled(format!("{rel:<11}"), theme.dim_style()),
+                Span::styled(format!("{kind:<6}"), theme.dim_style()),
+                Span::styled(
+                    format!("{:<width$}", target_text(r), width = TARGET_COLS + 2),
+                    target_style,
+                ),
+            ];
+            let prefix_cols: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let avail = (inner.width as usize).saturating_sub(prefix_cols);
             spans.extend(status_cell(r, theme, avail));
             if selected {
-                let reversed = Style::default().add_modifier(Modifier::REVERSED);
+                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                if (inner.width as usize) > used {
+                    spans.push(Span::raw(" ".repeat(inner.width as usize - used)));
+                }
+                let sel = theme.selection_style();
                 spans = spans
                     .into_iter()
-                    .map(|s| Span::styled(s.content, s.style.patch(reversed)))
+                    .map(|s| Span::styled(s.content, s.style.patch(sel)))
                     .collect();
             }
             lines.push(Line::from(spans));
@@ -385,14 +459,39 @@ fn draw_history(f: &mut Frame, area: Rect, state: &HomeState, theme: &Theme) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Badge column width: the widest badge (`● finalized`, 11 cols) plus one,
+/// so the dim metadata suffixes align across rows.
+const BADGE_COLS: usize = 12;
+
+/// Short badge word for a consensus verdict label — the vote-split detail
+/// stays in the report view. Prefix order matters: SHIP-WITH-CAVEATS starts
+/// with "SHIP". Unknown labels fall back to their first word.
+fn verdict_badge(label: &str) -> &str {
+    if label.starts_with("SHIP-WITH-CAVEATS") {
+        "CAVEATS"
+    } else if label.starts_with("SHIP") {
+        "SHIP"
+    } else if label.starts_with("HOLD") {
+        "HOLD"
+    } else if label.starts_with("BLOCK") {
+        "BLOCK"
+    } else {
+        label.split_whitespace().next().unwrap_or("finalized")
+    }
+}
+
 fn status_cell(r: &RunRecord, theme: &Theme, avail: usize) -> Vec<Span<'static>> {
     let (label, style, suffix): (String, Style, Option<String>) = match r.status {
         RunStatus::Finalized => {
-            let label = r
-                .verdict_label
-                .clone()
-                .unwrap_or_else(|| "finalized".into());
-            let style = theme.verdict(&label);
+            let (word, style) = match &r.verdict_label {
+                Some(v) => (verdict_badge(v).to_string(), theme.verdict(v)),
+                None => (
+                    "finalized".into(),
+                    Style::default()
+                        .fg(theme.run_status(&r.status))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            };
             let mut parts = Vec::new();
             if let Some(n) = r.findings_total {
                 parts.push(format!("{n} findings"));
@@ -400,28 +499,35 @@ fn status_cell(r: &RunRecord, theme: &Theme, avail: usize) -> Vec<Span<'static>>
             if let Some(n) = r.accepted_count {
                 parts.push(format!("{n} accepted"));
             }
-            let suffix = (!parts.is_empty()).then(|| format!("  {}", parts.join(" · ")));
-            (label, style, suffix)
+            let suffix = (!parts.is_empty()).then(|| parts.join(" · "));
+            (format!("\u{25cf} {word}"), style, suffix)
         }
         RunStatus::ReviewsComplete => (
-            "needs triage \u{25b8}".into(),
-            Style::default().fg(theme.run_status(&r.status)),
-            r.findings_total.map(|n| format!("  {n} findings waiting")),
+            "\u{25d0} triage \u{25b8}".into(),
+            Style::default()
+                .fg(theme.run_status(&r.status))
+                .add_modifier(Modifier::BOLD),
+            r.findings_total.map(|n| format!("{n} waiting")),
         ),
         RunStatus::Running => (
-            r.status.label().into(),
+            "\u{25cc} running".into(),
             Style::default().fg(theme.run_status(&r.status)),
             None,
         ),
         // Aborted/Stale read as muted "not resumable" rather than an alert
         // color — dim, not their (Red/Gray) `run_status` role colors.
-        RunStatus::Aborted | RunStatus::Stale => (r.status.label().into(), theme.dim_style(), None),
+        RunStatus::Aborted | RunStatus::Stale => (
+            format!("\u{25cb} {}", r.status.label()),
+            theme.dim_style(),
+            None,
+        ),
     };
+    let label = format!("{label:<BADGE_COLS$}");
     fit_status_cell(label, style, suffix, avail, theme)
 }
 
-/// Sacrifices the metadata suffix before ever cutting the label; an
-/// over-wide label is ellipsized at a char boundary, never bare-clipped.
+/// Sacrifices the metadata suffix first, then the label's alignment padding;
+/// an over-wide label is ellipsized at a char boundary, never bare-clipped.
 fn fit_status_cell(
     label: String,
     style: Style,
@@ -441,10 +547,12 @@ fn fit_status_cell(
             ];
         }
     }
-    if label_len <= avail {
-        return vec![Span::styled(label, style)];
+    let trimmed = label.trim_end().to_string();
+    let trimmed_len = trimmed.chars().count();
+    if trimmed_len <= avail {
+        return vec![Span::styled(trimmed, style)];
     }
-    let cut: String = label.chars().take(avail - 1).collect();
+    let cut: String = trimmed.chars().take(avail - 1).collect();
     vec![Span::styled(format!("{cut}…"), style)]
 }
 
@@ -659,30 +767,44 @@ mod tests {
         finalized.findings_total = Some(12);
         finalized.accepted_count = Some(8);
         let mut waiting = record("2026-07-10T05-00-00Z-spec", RunStatus::ReviewsComplete);
+        waiting.target = Target::SpecFiles(vec!["docs/superpowers/specs".into()]);
+        waiting.target_desc = "spec: docs/superpowers/specs".into();
         waiting.findings_total = Some(9);
         state_with(vec![], vec![finalized, waiting])
     }
 
     #[test]
-    fn history_rows_show_relative_time_verdict_and_triage_debt() {
+    fn history_rows_show_badges_kind_tags_and_metadata() {
         let s = history_fixture_state();
         // 94 cols models production: draw is called directly here, so we
         // simulate what a 100-col terminal leaves after draw_app's margins.
         let text = render_to_text(94, 30, |f| {
             draw(f, f.area(), &s, &ClaudeCheck::Ok, "opus", &Theme::default())
         });
-        // At 94 cols the verdict label fits intact but its metadata suffix
-        // does not.
+        assert!(text.contains("\u{25cf} CAVEATS"), "{text}");
         assert!(
-            text.contains("SHIP-WITH-CAVEATS (2/3 ship, 1/3 block)"),
-            "{text}"
+            !text.contains("SHIP-WITH-CAVEATS"),
+            "vote-split detail stays in the report view: {text}"
         );
+        assert!(text.contains("12 findings · 8 accepted"), "{text}");
+        assert!(text.contains("\u{25d0} triage \u{25b8}"), "{text}");
+        assert!(text.contains("9 waiting"), "{text}");
+        let diff_row = text
+            .lines()
+            .find(|l| l.contains("CAVEATS"))
+            .expect("diff row rendered");
         assert!(
-            !text.contains("12 findings"),
-            "metadata that cannot fit whole is dropped, not clipped: {text}"
+            diff_row.contains("diff  vs HEAD (uncommitted)"),
+            "kind column + stripped target: {diff_row:?}"
         );
-        assert!(text.contains("needs triage \u{25b8}"), "{text}");
-        assert!(text.contains("9 findings waiting"), "{text}");
+        let spec_row = text
+            .lines()
+            .find(|l| l.contains("triage"))
+            .expect("spec row rendered");
+        assert!(
+            spec_row.contains("spec  docs/superpowers/specs"),
+            "spec kind column without the `spec:` prefix: {spec_row:?}"
+        );
         assert!(
             !text.contains("2026-07-10T08-00-00Z"),
             "raw ids replaced by relative times: {text}"
@@ -690,28 +812,47 @@ mod tests {
     }
 
     #[test]
-    fn history_status_cell_ellipsizes_verdict_at_narrow_width() {
+    fn history_status_cell_drops_metadata_at_narrow_width() {
         let s = history_fixture_state();
-        // 76 cols ≈ an 80-col terminal after draw_app's margins; the
-        // history box borders leave 74 inner columns, so after the fixed
-        // 40-col time/target prefix only 34 remain for the status cell.
+        // 76 cols ≈ an 80-col terminal after draw_app's margins; borders,
+        // padding, and the 47-col gutter/time/kind/target prefix leave too
+        // little room for the metadata suffix — the badge survives whole.
         let text = render_to_text(76, 30, |f| {
             draw(f, f.area(), &s, &ClaudeCheck::Ok, "opus", &Theme::default())
         });
-        let row = text
-            .lines()
-            .find(|l| l.contains("SHIP-WITH-CAVEATS"))
-            .expect("verdict row rendered")
-            .to_string();
-        let content = row.trim_end().trim_end_matches('│').trim_end();
+        assert!(text.contains("\u{25cf} CAVEATS"), "{text}");
         assert!(
-            content.ends_with('…'),
-            "an over-wide verdict ends with an ellipsis, not a bare cut: {row:?}"
+            !text.contains("finding"),
+            "metadata that cannot fit whole is dropped, not clipped: {text}"
         );
-        assert!(
-            !row.contains("finding"),
-            "no clipped fragment of the findings metadata: {row:?}"
+    }
+
+    #[test]
+    fn fit_status_cell_sheds_suffix_then_padding_then_ellipsizes() {
+        let theme = Theme::default();
+        let cell = |avail| {
+            fit_status_cell(
+                format!("{:<BADGE_COLS$}", "\u{25cf} CAVEATS"),
+                Style::default(),
+                Some("12 findings".into()),
+                avail,
+                &theme,
+            )
+        };
+        let text =
+            |spans: Vec<Span>| -> String { spans.iter().map(|s| s.content.as_ref()).collect() };
+        assert_eq!(text(cell(23)), "\u{25cf} CAVEATS   12 findings");
+        assert_eq!(
+            text(cell(22)),
+            "\u{25cf} CAVEATS",
+            "suffix dropped first, padding shed with it"
         );
+        assert_eq!(
+            text(cell(5)),
+            "\u{25cf} CA\u{2026}",
+            "over-wide badge ellipsizes, never bare-clips"
+        );
+        assert!(text(cell(0)).is_empty());
     }
 
     #[test]
@@ -720,12 +861,68 @@ mod tests {
         let text = render_to_text(120, 30, |f| {
             draw(f, f.area(), &s, &ClaudeCheck::Ok, "opus", &Theme::default())
         });
-        assert!(
-            text.contains("SHIP-WITH-CAVEATS (2/3 ship, 1/3 block)"),
-            "{text}"
-        );
+        assert!(text.contains("\u{25cf} CAVEATS"), "{text}");
         assert!(text.contains("12 findings · 8 accepted"), "{text}");
-        assert!(text.contains("9 findings waiting"), "{text}");
+        assert!(text.contains("9 waiting"), "{text}");
+    }
+
+    #[test]
+    fn verdict_badge_maps_labels_and_falls_back_to_first_word() {
+        assert_eq!(verdict_badge("SHIP-WITH-CAVEATS (2/3 ship)"), "CAVEATS");
+        assert_eq!(verdict_badge("SHIP (unanimous, 2/2)"), "SHIP");
+        assert_eq!(verdict_badge("HOLD — split decision"), "HOLD");
+        assert_eq!(verdict_badge("BLOCK (2/2 block)"), "BLOCK");
+        assert_eq!(verdict_badge("SOMETHING else"), "SOMETHING");
+        assert_eq!(verdict_badge(""), "finalized");
+    }
+
+    #[test]
+    fn history_box_hugs_its_rows() {
+        let s = history_fixture_state();
+        let text = render_to_text(94, 40, |f| {
+            draw(f, f.area(), &s, &ClaudeCheck::Ok, "opus", &Theme::default())
+        });
+        let lines: Vec<&str> = text.lines().collect();
+        let top = lines
+            .iter()
+            .position(|l| l.contains(" history "))
+            .expect("history title rendered");
+        let bottom = lines
+            .iter()
+            .rposition(|l| l.contains('\u{2570}'))
+            .expect("history bottom border rendered");
+        assert_eq!(
+            bottom - top,
+            s.runs.len() + 1,
+            "two runs → a 4-row box, not a frame to the footer: {text}"
+        );
+    }
+
+    #[test]
+    fn selected_history_row_wears_a_bg_tint_not_reverse_video() {
+        let mut s = history_fixture_state();
+        s.zone = HomeZone::History;
+        let buffer = crate::ui::app::render_to_buffer(94, 30, |f| {
+            draw(f, f.area(), &s, &ClaudeCheck::Ok, "opus", &Theme::default())
+        });
+        let mut bar = None;
+        'outer: for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].symbol() == "\u{258c}" {
+                    bar = Some((x, y));
+                    break 'outer;
+                }
+            }
+        }
+        let (x, y) = bar.expect("selection bar rendered");
+        let style = buffer[(x, y)].style();
+        assert_eq!(style.bg, Some(ratatui::style::Color::DarkGray));
+        assert!(
+            !style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED),
+            "selection is a tint, not reverse video"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::ui::theme::Theme;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 pub(crate) fn centered(area: Rect, width_pct: u16, height: u16) -> Rect {
@@ -32,9 +32,7 @@ pub(crate) fn draw_help(f: &mut Frame, area: Rect, entries: &[(&str, &str)], the
             ])
         })
         .collect();
-    let block = Block::bordered()
-        .title("help — any key closes")
-        .border_style(theme.dim_style());
+    let block = theme.panel("help — any key closes", true);
     f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 

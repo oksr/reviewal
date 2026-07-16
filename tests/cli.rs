@@ -10,12 +10,7 @@ fn personas_lists_builtins() {
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     for name in [
-        "prover",
-        "breaker",
-        "steward",
-        "skeptic",
-        "stickler",
-        "advocate",
+        "prover", "breaker", "steward", "skeptic", "stickler", "advocate",
     ] {
         assert!(text.contains(name), "missing {name}");
     }

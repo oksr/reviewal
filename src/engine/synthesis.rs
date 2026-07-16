@@ -270,7 +270,11 @@ pub(crate) fn synthesize(
 /// outranks a validation; a lone report with neither is solo.
 fn grade(f: &Finding) -> Confidence {
     let unchallenged = f.challengers.is_empty();
-    match (unchallenged, f.reporters.len() >= 2, !f.validators.is_empty()) {
+    match (
+        unchallenged,
+        f.reporters.len() >= 2,
+        !f.validators.is_empty(),
+    ) {
         (false, _, _) => Confidence::Disputed,
         (true, true, _) => Confidence::CrossValidated,
         (true, false, true) => Confidence::Consensus,
@@ -323,7 +327,10 @@ fn render_finding(f: &Finding, lines: &mut Vec<String>) {
     }
     for c in &f.challengers {
         lines.push(String::new());
-        lines.push(format!("> ⚠️ challenged by **{}**: {}", c.persona, c.reason));
+        lines.push(format!(
+            "> ⚠️ challenged by **{}**: {}",
+            c.persona, c.reason
+        ));
     }
     lines.push(String::new());
 }

@@ -8,7 +8,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -527,9 +527,7 @@ fn draw_header(f: &mut Frame, area: Rect, state: &DashboardState, theme: &Theme)
 }
 
 fn draw_ticker(f: &mut Frame, area: Rect, state: &DashboardState, theme: &Theme) {
-    let block = Block::bordered()
-        .title(format!("findings so far — {}", state.ticker.len()))
-        .border_style(theme.dim_style());
+    let block = theme.panel(&format!("findings so far — {}", state.ticker.len()), false);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -643,9 +641,7 @@ fn draw_armed_line(f: &mut Frame, area: Rect, state: &DashboardState, theme: &Th
 /// Deliberately NEUTRAL (dim), never `theme.error` red — a cancel is an
 /// operator choice rather than a failure.
 fn draw_cancelled(f: &mut Frame, area: Rect, kept: usize, resumable: bool, theme: &Theme) {
-    let block = Block::bordered()
-        .title(Span::styled("run cancelled", theme.dim_style()))
-        .border_style(theme.dim_style());
+    let block = theme.panel("run cancelled", false);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let review_word = if kept == 1 { "review" } else { "reviews" };
@@ -665,8 +661,11 @@ fn draw_summary(
     theme: &Theme,
 ) {
     let warn = Style::default().fg(theme.severity_warning);
-    let block = Block::bordered()
-        .title(Span::styled("reviews complete — degraded", warn))
+    let block = crate::ui::theme::bordered()
+        .title(crate::ui::theme::inset_title(
+            Line::from(Span::styled("reviews complete — degraded", warn)),
+            warn,
+        ))
         .border_style(warn);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -743,10 +742,15 @@ fn draw_panels(f: &mut Frame, area: Rect, state: &DashboardState, theme: &Theme)
         );
         f.render_widget(
             Paragraph::new(lines)
-                .block(Block::bordered().border_style(border).title(Span::styled(
-                    persona.as_str(),
-                    Style::default().fg(pcolor).add_modifier(Modifier::BOLD),
-                )))
+                .block(crate::ui::theme::bordered().border_style(border).title(
+                    crate::ui::theme::inset_title(
+                        Line::from(Span::styled(
+                            persona.as_str().to_owned(),
+                            Style::default().fg(pcolor).add_modifier(Modifier::BOLD),
+                        )),
+                        border,
+                    ),
+                ))
                 .wrap(Wrap { trim: false }),
             columns[i],
         );
@@ -780,8 +784,11 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, state: &DashboardState, theme: &Th
             Paragraph::new(body)
                 .style(Style::default().fg(theme.error))
                 .block(
-                    Block::bordered()
-                        .title("run failed")
+                    crate::ui::theme::bordered()
+                        .title(crate::ui::theme::inset_title(
+                            Line::raw("run failed"),
+                            Style::default().fg(theme.error),
+                        ))
                         .border_style(Style::default().fg(theme.error)),
                 )
                 .wrap(Wrap { trim: false }),
@@ -1451,10 +1458,7 @@ mod tests {
         assert!(t.is_none(), "degraded runs must not auto-advance");
         let text = render_to_text(100, 30, |f| draw(f, f.area(), &s, &Theme::default()));
         assert!(text.contains("reviews complete — degraded"), "{text}");
-        assert!(
-            text.contains("10 findings from prover + steward"),
-            "{text}"
-        );
+        assert!(text.contains("10 findings from prover + steward"), "{text}");
         assert!(text.contains("breaker failed and is excluded"), "{text}");
         assert!(
             text.contains("the consensus verdict below counts 2 of 3 requested reviewers"),
@@ -1498,12 +1502,7 @@ mod tests {
     #[test]
     fn six_failed_panels_at_80x24_keep_columns_and_status_lines() {
         let personas = [
-            "prover",
-            "breaker",
-            "skeptic",
-            "stickler",
-            "steward",
-            "advocate",
+            "prover", "breaker", "skeptic", "stickler", "steward", "advocate",
         ];
         let mut s = DashboardState::new(
             personas.iter().map(|p| p.to_string()).collect(),

@@ -156,14 +156,8 @@ pub fn load_custom(dirs: &[PathBuf]) -> (Vec<Persona>, Vec<PersonaLoadError>) {
 /// can write a byte-exact copy.
 const BUILTIN_FILES: [(&str, &str); 6] = [
     ("prover", include_str!("../../assets/personas/prover.md")),
-    (
-        "breaker",
-        include_str!("../../assets/personas/breaker.md"),
-    ),
-    (
-        "steward",
-        include_str!("../../assets/personas/steward.md"),
-    ),
+    ("breaker", include_str!("../../assets/personas/breaker.md")),
+    ("steward", include_str!("../../assets/personas/steward.md")),
     ("skeptic", include_str!("../../assets/personas/skeptic.md")),
     (
         "stickler",

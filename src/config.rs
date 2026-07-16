@@ -12,6 +12,13 @@ pub struct Config {
     /// tests hermetic by construction instead of by env manipulation. Not a
     /// config.toml key: it derives from where the config itself lives.
     pub global_persona_dir: Option<PathBuf>,
+    /// NO_COLOR, as read by [`load`] — same hermeticity contract as
+    /// `global_persona_dir`: a `Config::default()` is always colored, no
+    /// matter what the developer's shell exports.
+    pub env_no_color: bool,
+    /// Whether COLORTERM advertised 24-bit color, as read by [`load`].
+    /// `[theme] truecolor` overrides it; see `Theme::load_with`.
+    pub env_truecolor: bool,
     pub(crate) theme: ThemeOverrides,
 }
 
@@ -22,6 +29,8 @@ impl Default for Config {
             timeout_secs: 600,
             claude_bin: "claude".into(),
             global_persona_dir: None,
+            env_no_color: false,
+            env_truecolor: false,
             theme: ThemeOverrides::default(),
         }
     }
@@ -42,7 +51,7 @@ impl Config {
 // The color-role list is generated from `theme.rs`'s `for_each_color_role!`
 // table, so adding a role there adds the field here automatically.
 macro_rules! declare_theme_overrides {
-    ($($role:ident: $default:ident),* $(,)?) => {
+    ($($role:ident: $ansi:ident = $rgb:literal),* $(,)?) => {
         /// Raw `[theme]` values; parsing into ratatui colors happens in
         /// `ui::theme::Theme::load` so this module stays UI-free. Unknown keys
         /// reject the whole file with a warning, so a typo'd role name cannot
@@ -52,6 +61,9 @@ macro_rules! declare_theme_overrides {
         pub(crate) struct ThemeOverrides {
             $(pub $role: Option<String>,)*
             pub persona_pool: Option<Vec<String>>,
+            /// Forces the 24-bit palette on (`true`) or off (`false`);
+            /// unset defers to COLORTERM detection.
+            pub truecolor: Option<bool>,
         }
 
         /// The [theme] table merges per-field across the global → project layers.
@@ -61,6 +73,9 @@ macro_rules! declare_theme_overrides {
             $( if p.$role.is_some() { t.$role = p.$role; } )*
             if p.persona_pool.is_some() {
                 t.persona_pool = p.persona_pool;
+            }
+            if p.truecolor.is_some() {
+                t.truecolor = p.truecolor;
             }
         }
     };
@@ -159,6 +174,15 @@ pub fn load(project_root: &Path) -> (Config, Vec<String>) {
     let project = project_root.join(".reviewal/config.toml");
     let (mut config, warnings) = load_from(global.as_deref(), Some(&project));
     config.global_persona_dir = global_dir.map(|d| d.join("personas"));
+    config.env_no_color = std::env::var("NO_COLOR")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    config.env_truecolor = std::env::var("COLORTERM")
+        .map(|v| {
+            let v = v.to_ascii_lowercase();
+            v.contains("truecolor") || v.contains("24bit")
+        })
+        .unwrap_or(false);
     (config, warnings)
 }
 

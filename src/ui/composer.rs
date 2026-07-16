@@ -8,9 +8,9 @@ use crate::ui::format::{truncate_end, truncate_path_start};
 use crate::ui::theme::{validate_persona_colors, Theme, BUILTIN_SLOTS};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -1125,8 +1125,8 @@ impl ComposerState {
 }
 
 /// Column where field values and descriptions start: the 16-column label
-/// cell plus one unstyled gap column, so the focused label's reversed
-/// background never abuts the value text.
+/// cell plus one unstyled gap column, so the focused label's selection
+/// tint never abuts the value text.
 const VALUE_COL: usize = 17;
 
 fn label_cell(label: &str, focused: bool, theme: &Theme) -> Span<'static> {
@@ -1135,7 +1135,7 @@ fn label_cell(label: &str, focused: bool, theme: &Theme) -> Span<'static> {
             format!("\u{25b8} {label:<14}"),
             Style::default()
                 .fg(theme.accent)
-                .add_modifier(Modifier::REVERSED),
+                .patch(theme.selection_style()),
         )
     } else {
         Span::raw(format!("  {label:<14}"))
@@ -1179,7 +1179,7 @@ fn target_expansion(state: &ComposerState, theme: &Theme) -> Vec<Line<'static>> 
             let style = if state.target_cursor == i {
                 Style::default()
                     .fg(theme.accent)
-                    .add_modifier(Modifier::REVERSED)
+                    .patch(theme.selection_style())
             } else {
                 Style::default()
             };
@@ -1340,7 +1340,7 @@ fn start_row(state: &ComposerState, theme: &Theme) -> Line<'static> {
             "\u{25b8}",
             Style::default()
                 .fg(theme.accent)
-                .add_modifier(Modifier::REVERSED),
+                .patch(theme.selection_style()),
         )
     } else {
         (" ", theme.accent_style())
@@ -1452,7 +1452,7 @@ fn reviewer_expansion(state: &ComposerState, theme: &Theme, budget: usize) -> Ve
                     format!("{marker} {name:<12}\u{2014} {lens}{}{tag}", " ".repeat(pad)),
                     Style::default()
                         .fg(theme.accent)
-                        .add_modifier(Modifier::REVERSED),
+                        .patch(theme.selection_style()),
                 ));
             } else {
                 let marker_style = if c.enabled {
@@ -1494,7 +1494,7 @@ fn reviewer_expansion(state: &ComposerState, theme: &Theme, budget: usize) -> Ve
                 body,
                 Style::default()
                     .fg(theme.error)
-                    .add_modifier(Modifier::REVERSED),
+                    .patch(theme.selection_style()),
             ));
         } else {
             spans.push(Span::styled(body, Style::default().fg(theme.error)));
@@ -1524,7 +1524,7 @@ fn model_expansion(state: &ComposerState, theme: &Theme) -> Vec<Line<'static>> {
             let style = if state.model_idx == i {
                 Style::default()
                     .fg(theme.accent)
-                    .add_modifier(Modifier::REVERSED)
+                    .patch(theme.selection_style())
             } else {
                 Style::default()
             };
@@ -1676,7 +1676,7 @@ fn draw_picker(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) 
         ));
         let mut line = Line::from(spans);
         if picker.cursor == i {
-            line = line.patch_style(Style::default().add_modifier(Modifier::REVERSED));
+            line = line.patch_style(theme.selection_style());
         }
         lines.push(line);
     }
@@ -1692,9 +1692,7 @@ fn draw_picker(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) 
         "pick spec files \u{2014} {} selected",
         picker.selected.len()
     );
-    let block = Block::bordered()
-        .title(title)
-        .border_style(theme.accent_style());
+    let block = theme.panel(&title, true);
     f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
@@ -1723,8 +1721,8 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, state: &ComposerState, theme: &The
     let (cost_prose, cost_calls) = state.cost_parts();
     f.render_widget(
         Paragraph::new(rows).block(
-            Block::bordered()
-                .title("setup")
+            theme
+                .panel("setup", true)
                 .title_bottom(
                     Line::from(vec![
                         Span::styled(cost_prose, theme.dim_style()),
@@ -1820,8 +1818,8 @@ fn draw_pager(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) {
     let Some(p) = &state.pager else { return };
     let rect = crate::ui::overlay::centered(area, 80, area.height.saturating_sub(4).max(5));
     f.render_widget(Clear, rect);
-    let block = Block::bordered()
-        .title(p.title.clone())
+    let block = theme
+        .panel(&p.title, true)
         .title_bottom(
             theme
                 .hints(&[("j/k", "scroll"), ("esc", "close")])
@@ -1868,14 +1866,7 @@ fn draw_scope(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) {
         ]),
         theme.hints(&[("esc", "cancel")]),
     ];
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered()
-                .title(title)
-                .border_style(theme.accent_style()),
-        ),
-        rect,
-    );
+    f.render_widget(Paragraph::new(lines).block(theme.panel(&title, true)), rect);
 }
 
 #[cfg(test)]
@@ -3328,7 +3319,12 @@ mod tests {
             .position(|p| p.persona.name == "skeptic")
             .unwrap();
         assert!(
-            c.personas[i].persona.source.as_ref().unwrap().starts_with(&pdir),
+            c.personas[i]
+                .persona
+                .source
+                .as_ref()
+                .unwrap()
+                .starts_with(&pdir),
             "project file wins the load over the global copy"
         );
         c.persona_cursor = i;

@@ -105,8 +105,7 @@ pub fn build_review_spec(
         (None, false) => Target::SpecFiles(spec),
     };
     let kind = target.kind();
-    let (available, failures) =
-        crate::engine::persona::available(kind, &config.persona_dirs(root));
+    let (available, failures) = crate::engine::persona::available(kind, &config.persona_dirs(root));
     for w in &failures {
         eprintln!("warning: {w}");
     }
@@ -704,11 +703,7 @@ echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$esc\"}"
         let (tx, rx) = mpsc::unbounded_channel();
         let (_ctx, cancel) = watch::channel(false);
         execute_run(
-            run_spec(
-                dir.path(),
-                bin,
-                vec![persona("prover"), persona("skeptic")],
-            ),
+            run_spec(dir.path(), bin, vec![persona("prover"), persona("skeptic")]),
             tx,
             cancel,
         )
@@ -735,11 +730,7 @@ echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$esc\"}"
         let (tx, rx) = mpsc::unbounded_channel();
         let (_ctx, cancel) = watch::channel(false);
         execute_run(
-            run_spec(
-                dir.path(),
-                bin,
-                vec![persona("prover"), persona("skeptic")],
-            ),
+            run_spec(dir.path(), bin, vec![persona("prover"), persona("skeptic")]),
             tx,
             cancel,
         )
@@ -773,11 +764,7 @@ echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$esc\"}"
         let (tx, rx) = mpsc::unbounded_channel();
         let (_ctx, cancel) = watch::channel(false);
         execute_run(
-            run_spec(
-                dir.path(),
-                bin,
-                vec![persona("prover"), persona("skeptic")],
-            ),
+            run_spec(dir.path(), bin, vec![persona("prover"), persona("skeptic")]),
             tx,
             cancel,
         )
@@ -868,9 +855,9 @@ echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$esc\"}"
         )
         .await;
         let events = drain(rx).await;
-        assert!(events.iter().any(
-            |e| matches!(e, RunEvent::AgentRetrying { persona, .. } if persona == "breaker")
-        ));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RunEvent::AgentRetrying { persona, .. } if persona == "breaker")));
         assert!(events
             .iter()
             .any(|e| matches!(e, RunEvent::AgentFailed { persona, .. } if persona == "breaker")));
@@ -916,11 +903,7 @@ echo "{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$esc\"}}"
         let (tx, rx) = mpsc::unbounded_channel();
         let (_ctx, cancel) = watch::channel(false);
         execute_run(
-            run_spec(
-                dir.path(),
-                bin,
-                vec![persona("prover"), persona("breaker")],
-            ),
+            run_spec(dir.path(), bin, vec![persona("prover"), persona("breaker")]),
             tx,
             cancel,
         )
@@ -958,11 +941,7 @@ echo "{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$esc\"}}"
         let (tx, rx) = mpsc::unbounded_channel();
         let (_ctx, cancel) = watch::channel(false);
         execute_run(
-            run_spec(
-                dir.path(),
-                bin,
-                vec![persona("prover"), persona("skeptic")],
-            ),
+            run_spec(dir.path(), bin, vec![persona("prover"), persona("skeptic")]),
             tx,
             cancel,
         )
@@ -1012,11 +991,7 @@ esc=$(printf '%s' "$inner" | sed 's/\\/\\\\/g; s/"/\\"/g')
 echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$esc\"}"
 "#;
         let bin = script(dir.path(), "claude", round_aware);
-        let mut spec = run_spec(
-            dir.path(),
-            bin,
-            vec![persona("prover"), persona("skeptic")],
-        );
+        let mut spec = run_spec(dir.path(), bin, vec![persona("prover"), persona("skeptic")]);
         spec.cross_review = true;
         let (tx, rx) = mpsc::unbounded_channel();
         let (_ctx, cancel) = watch::channel(false);
@@ -1041,11 +1016,7 @@ echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$esc\"}"
         let (tx, rx) = mpsc::unbounded_channel();
         let (ctx, cancel) = watch::channel(false);
         let handle = tokio::spawn(execute_run(
-            run_spec(
-                dir.path(),
-                bin,
-                vec![persona("prover"), persona("skeptic")],
-            ),
+            run_spec(dir.path(), bin, vec![persona("prover"), persona("skeptic")]),
             tx,
             cancel,
         ));
@@ -1093,11 +1064,7 @@ echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$esc\"}"
     async fn round1_output_is_on_disk_before_agent_done_event() {
         let dir = spec_dir();
         let bin = script(dir.path(), "claude", HAPPY_SCRIPT);
-        let spec = run_spec(
-            dir.path(),
-            bin,
-            vec![persona("prover"), persona("skeptic")],
-        );
+        let spec = run_spec(dir.path(), bin, vec![persona("prover"), persona("skeptic")]);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (_ctx, crx) = watch::channel(false);
         execute_run(spec, tx, crx).await;
@@ -1228,11 +1195,7 @@ esc=$(printf '%s' "$inner" | sed 's/\\/\\\\/g; s/"/\\"/g')
 echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$esc\"}"
 "#;
         let bin = script(dir.path(), "claude", slow_round2);
-        let mut spec = run_spec(
-            dir.path(),
-            bin,
-            vec![persona("prover"), persona("skeptic")],
-        );
+        let mut spec = run_spec(dir.path(), bin, vec![persona("prover"), persona("skeptic")]);
         spec.cross_review = true;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (ctx, crx) = watch::channel(false);

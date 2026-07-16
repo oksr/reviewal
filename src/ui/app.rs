@@ -374,10 +374,8 @@ impl App {
                     return;
                 }
                 let kind = target.kind();
-                let (personas, warnings) = crate::engine::persona::available(
-                    kind,
-                    &self.config.persona_dirs(&self.root),
-                );
+                let (personas, warnings) =
+                    crate::engine::persona::available(kind, &self.config.persona_dirs(&self.root));
                 let joined = warnings
                     .iter()
                     .map(|w| w.to_string())

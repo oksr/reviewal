@@ -8,12 +8,7 @@ use std::str::FromStr;
 /// Builtin persona names in color-slot order (not builtins() load order);
 /// a test pins that the two cover the same set of names.
 pub(crate) const BUILTIN_SLOTS: [&str; 6] = [
-    "prover",
-    "breaker",
-    "skeptic",
-    "stickler",
-    "steward",
-    "advocate",
+    "prover", "breaker", "skeptic", "stickler", "steward", "advocate",
 ];
 
 fn fnv1a_64(bytes: &[u8]) -> u64 {
@@ -53,46 +48,68 @@ pub(crate) const DEFAULT_POOL: [Color; 7] = [
     Color::LightMagenta,
 ];
 
+const fn rgb(hex: u32) -> Color {
+    Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+/// Truecolor mirror of [`DEFAULT_POOL`], slot for slot, so builtin personas
+/// keep their hue family when the terminal upgrades to 24-bit color.
+pub(crate) const TRUECOLOR_POOL: [Color; 7] = [
+    rgb(0x7dcfff), // cyan slot
+    rgb(0xbb9af7), // magenta slot
+    rgb(0x7aa2f7), // blue slot — the default accent, filtered out by default
+    rgb(0xe0af68), // yellow slot
+    rgb(0x9ece6a), // green slot
+    rgb(0x2ac3de), // light-blue slot
+    rgb(0xff9ac1), // light-magenta slot
+];
+
 /// Single source of truth for the scalar color roles: `Theme`, its `Default`,
-/// `monochrome`, `apply_color_overrides`, and config's `ThemeOverrides` all
-/// expand this table, so adding or renaming a role here updates every site
-/// at once; the non-scalar `persona_pool`/`mono` are handled explicitly.
+/// `truecolor`, `monochrome`, `apply_color_overrides`, and config's
+/// `ThemeOverrides` all expand this table, so adding or renaming a role here
+/// updates every site at once; the non-scalar `persona_pool`/`mono` and the
+/// `truecolor` config flag are handled explicitly. Each role carries its ANSI
+/// default and the 24-bit default used on truecolor terminals.
 macro_rules! for_each_color_role {
     ($apply:ident) => {
         $apply! {
-            accent: Blue,
+            accent: Blue = 0x7aa2f7,
             // ANSI Gray (7), not DarkGray (bright-black): DarkGray is nearly
             // invisible on most dark terminal themes. Gray reads as muted
             // next to the default foreground while staying legible.
-            dim: Gray,
-            error: Red,
-            status_pending: Gray,
-            status_retrying: Yellow,
-            status_done: Green,
-            status_failed: Red,
-            run_status_running: Cyan,
-            run_status_reviews_complete: Yellow,
-            run_status_finalized: Green,
-            run_status_aborted: Red,
-            run_status_stale: Gray,
-            severity_critical: Red,
-            severity_warning: Yellow,
-            severity_info: Blue,
-            confidence_cross_validated: Green,
-            confidence_consensus: Cyan,
-            confidence_disputed: Yellow,
-            confidence_solo: Gray,
-            verdict_ship: Green,
-            verdict_caveats: Yellow,
-            verdict_hold: LightRed,
-            verdict_block: Red,
+            dim: Gray = 0x565f89,
+            // Background tint for the selected row; DarkGray's fg-legibility
+            // problem doesn't apply to backgrounds, where it reads as a
+            // subtle bar under the default foreground.
+            selection_bg: DarkGray = 0x2a2f41,
+            error: Red = 0xf7768e,
+            status_pending: Gray = 0x565f89,
+            status_retrying: Yellow = 0xe0af68,
+            status_done: Green = 0x9ece6a,
+            status_failed: Red = 0xf7768e,
+            run_status_running: Cyan = 0x7dcfff,
+            run_status_reviews_complete: Yellow = 0xe0af68,
+            run_status_finalized: Green = 0x9ece6a,
+            run_status_aborted: Red = 0xf7768e,
+            run_status_stale: Gray = 0x565f89,
+            severity_critical: Red = 0xf7768e,
+            severity_warning: Yellow = 0xe0af68,
+            severity_info: Blue = 0x7aa2f7,
+            confidence_cross_validated: Green = 0x9ece6a,
+            confidence_consensus: Cyan = 0x7dcfff,
+            confidence_disputed: Yellow = 0xe0af68,
+            confidence_solo: Gray = 0x565f89,
+            verdict_ship: Green = 0x9ece6a,
+            verdict_caveats: Yellow = 0xe0af68,
+            verdict_hold: LightRed = 0xff9e64,
+            verdict_block: Red = 0xf7768e,
         }
     };
 }
 pub(crate) use for_each_color_role;
 
 macro_rules! declare_theme {
-    ($($role:ident: $default:ident),* $(,)?) => {
+    ($($role:ident: $ansi:ident = $rgb:literal),* $(,)?) => {
         /// Semantic color roles. Screens never name a raw `Color::` — they ask the
         /// theme by meaning. Built once at startup; persona colors are computed on
         /// demand by `persona_color`, so nothing here depends on per-run data.
@@ -105,7 +122,7 @@ macro_rules! declare_theme {
         impl Default for Theme {
             fn default() -> Self {
                 let mut theme = Theme {
-                    $($role: Color::$default,)*
+                    $($role: Color::$ansi,)*
                     persona_pool: Vec::new(),
                     mono: false,
                 };
@@ -119,6 +136,22 @@ macro_rules! declare_theme {
         }
 
         impl Theme {
+            /// The curated 24-bit palette, used when the terminal advertises
+            /// truecolor. Same roles, softer related hues.
+            pub(crate) fn truecolor() -> Theme {
+                let mut theme = Theme {
+                    $($role: rgb($rgb),)*
+                    persona_pool: Vec::new(),
+                    mono: false,
+                };
+                theme.persona_pool = TRUECOLOR_POOL
+                    .iter()
+                    .copied()
+                    .filter(|c| *c != theme.accent)
+                    .collect();
+                theme
+            }
+
             /// NO_COLOR mode: every color is `Reset`; bold/reversed modifiers survive.
             pub(crate) fn monochrome() -> Theme {
                 Theme {
@@ -144,6 +177,44 @@ macro_rules! declare_theme {
             } )*
         }
     };
+}
+
+/// Shared box chrome: every bordered block in the app renders through this
+/// so the screens read as one system.
+pub(crate) fn bordered() -> ratatui::widgets::Block<'static> {
+    ratatui::widgets::Block::bordered().border_type(ratatui::widgets::BorderType::Rounded)
+}
+
+/// Sets an already-styled title line into the border (`╭─ title ──…`), for
+/// boxes whose titles carry their own spans or colors; plain-text titles go
+/// through [`Theme::panel`] instead.
+pub(crate) fn inset_title(mut title: Line<'static>, border_style: Style) -> Line<'static> {
+    let mut spans = vec![Span::styled("\u{2500} ", border_style)];
+    spans.append(&mut title.spans);
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+impl Theme {
+    /// Focus-aware box: rounded, dim when unfocused, title set into the
+    /// border line. Screens with styled titles compose [`bordered`] +
+    /// [`inset_title`] directly.
+    pub(crate) fn panel(&self, title: &str, focused: bool) -> ratatui::widgets::Block<'static> {
+        let border_style = if focused {
+            self.accent_style()
+        } else {
+            self.dim_style()
+        };
+        let title_style = if focused {
+            self.title_style()
+        } else {
+            self.dim_style()
+        };
+        bordered().border_style(border_style).title(inset_title(
+            Line::styled(title.to_string(), title_style),
+            border_style,
+        ))
+    }
 }
 for_each_color_role!(declare_theme);
 
@@ -211,6 +282,17 @@ impl Theme {
         Style::default().fg(self.dim)
     }
 
+    /// Row-selection treatment: a soft background tint, so per-cell colors
+    /// survive selection. Monochrome falls back to reverse video — a bg
+    /// tint would be invisible without color.
+    pub(crate) fn selection_style(&self) -> Style {
+        if self.mono {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().bg(self.selection_bg)
+        }
+    }
+
     pub(crate) fn hint_spans(&self, pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
         let mut spans = Vec::new();
         for (i, (key, desc)) in pairs.iter().enumerate() {
@@ -246,30 +328,41 @@ impl Theme {
         self.persona_pool[(h % self.persona_pool.len() as u64) as usize]
     }
 
-    /// Reads NO_COLOR from the environment. All logic lives in `load_with`
-    /// so tests never touch process-global env vars.
+    /// Pure function of the config: NO_COLOR and COLORTERM are read once by
+    /// `config::load` and arrive as `env_no_color`/`env_truecolor`, so a
+    /// `Config::default()` yields the same theme in every environment.
     pub(crate) fn load(config: &crate::config::Config) -> (Theme, Vec<String>) {
-        let no_color = std::env::var("NO_COLOR")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        Theme::load_with(config, no_color)
+        Theme::load_with(config, config.env_no_color, config.env_truecolor)
     }
 
     /// Env-free core of [`load`](Theme::load). Never fails — invalid color
     /// overrides are dropped and reported in the returned warnings, not errored.
+    /// `truecolor` is the terminal capability as detected; the config's
+    /// `[theme] truecolor` key overrides it in either direction.
     pub(crate) fn load_with(
         config: &crate::config::Config,
         no_color: bool,
+        truecolor: bool,
     ) -> (Theme, Vec<String>) {
         if no_color {
             return (Theme::monochrome(), vec![]);
         }
-        let mut theme = Theme::default();
-        let mut warnings = Vec::new();
         let o = &config.theme;
+        let use_rgb = o.truecolor.unwrap_or(truecolor);
+        let base_pool: &[Color] = if use_rgb {
+            &TRUECOLOR_POOL
+        } else {
+            &DEFAULT_POOL
+        };
+        let mut theme = if use_rgb {
+            Theme::truecolor()
+        } else {
+            Theme::default()
+        };
+        let mut warnings = Vec::new();
         apply_color_overrides(&mut theme, o, &mut warnings);
         let mut pool: Vec<Color> = match &o.persona_pool {
-            None => DEFAULT_POOL.to_vec(),
+            None => base_pool.to_vec(),
             Some(names) => names
                 .iter()
                 .filter_map(|n| match Color::from_str(n) {
@@ -287,7 +380,7 @@ impl Theme {
                 "theme: persona_pool has fewer than 2 usable colors; using the default pool"
                     .to_string(),
             );
-            pool = DEFAULT_POOL
+            pool = base_pool
                 .iter()
                 .copied()
                 .filter(|c| *c != theme.accent)
@@ -356,7 +449,7 @@ mod tests {
             severity_critical: Some("#ff5555".into()),
             ..Default::default()
         };
-        let (t, warnings) = Theme::load_with(&config_with_theme(o), false);
+        let (t, warnings) = Theme::load_with(&config_with_theme(o), false, false);
         assert_eq!(t.accent, Color::Magenta);
         assert_eq!(t.severity_critical, Color::Rgb(0xff, 0x55, 0x55));
         assert!(warnings.is_empty());
@@ -368,11 +461,11 @@ mod tests {
         // config key actually lands on its Theme field end-to-end, so a serde
         // rename or a special-cased field can't quietly break one role.
         macro_rules! check_round_trip {
-            ($($role:ident: $default:ident),* $(,)?) => {
+            ($($role:ident: $ansi:ident = $rgb:literal),* $(,)?) => {
                 $(
                     let o: crate::config::ThemeOverrides =
                         toml::from_str(concat!(stringify!($role), " = \"red\"")).unwrap();
-                    let (t, warnings) = Theme::load_with(&config_with_theme(o), false);
+                    let (t, warnings) = Theme::load_with(&config_with_theme(o), false, false);
                     assert_eq!(
                         t.$role,
                         Color::Red,
@@ -406,11 +499,11 @@ mod tests {
             .join("\n");
         let o: crate::config::ThemeOverrides =
             toml::from_str(&uncommented).expect("README block is valid TOML when uncommented");
-        let (t, warnings) = Theme::load_with(&config_with_theme(o), false);
+        let (t, warnings) = Theme::load_with(&config_with_theme(o), false, false);
         assert!(warnings.is_empty(), "{warnings:?}");
         let d = Theme::default();
         macro_rules! check_matches_default {
-            ($($role:ident: $default:ident),* $(,)?) => {
+            ($($role:ident: $ansi:ident = $rgb:literal),* $(,)?) => {
                 $(
                     assert!(
                         uncommented.contains(stringify!($role)),
@@ -436,7 +529,7 @@ mod tests {
             accent: Some("blurple".into()),
             ..Default::default()
         };
-        let (t, warnings) = Theme::load_with(&config_with_theme(o), false);
+        let (t, warnings) = Theme::load_with(&config_with_theme(o), false, false);
         assert_eq!(t.accent, Color::Blue, "default kept");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("blurple") && warnings[0].contains("accent"));
@@ -448,7 +541,7 @@ mod tests {
             accent: Some("magenta".into()),
             ..Default::default()
         };
-        let (t, _) = Theme::load_with(&config_with_theme(o), false);
+        let (t, _) = Theme::load_with(&config_with_theme(o), false, false);
         assert!(!t.persona_pool.contains(&Color::Magenta));
         assert!(
             t.persona_pool.contains(&Color::Blue),
@@ -467,7 +560,7 @@ mod tests {
             persona_pool: Some(vec!["blue".into()]), // == accent → filtered to zero
             ..Default::default()
         };
-        let (t, warnings) = Theme::load_with(&config_with_theme(o), false);
+        let (t, warnings) = Theme::load_with(&config_with_theme(o), false, false);
         assert_eq!(
             t.persona_pool.len(),
             6,
@@ -482,12 +575,78 @@ mod tests {
             accent: Some("blurple".into()), // invalid — but must not be validated
             ..Default::default()
         };
-        let (t, warnings) = Theme::load_with(&config_with_theme(o), true);
+        let (t, warnings) = Theme::load_with(&config_with_theme(o), true, false);
         assert!(t.mono);
         assert!(
             warnings.is_empty(),
             "overrides neither applied nor validated"
         );
+    }
+
+    #[test]
+    fn truecolor_flag_selects_the_rgb_palette() {
+        let (t, warnings) = Theme::load_with(&crate::config::Config::default(), false, true);
+        assert!(warnings.is_empty());
+        assert_eq!(t.accent, Color::Rgb(0x7a, 0xa2, 0xf7));
+        assert_eq!(t.dim, Color::Rgb(0x56, 0x5f, 0x89));
+        assert_eq!(t.persona_pool.len(), 6, "accent filtered from RGB pool");
+        assert!(!t.persona_pool.contains(&t.accent));
+        assert_eq!(
+            t.persona_color("prover", None),
+            Color::Rgb(0x7d, 0xcf, 0xff),
+            "builtin slot order preserved in the RGB pool"
+        );
+    }
+
+    #[test]
+    fn config_truecolor_key_overrides_detection_both_ways() {
+        let forced_on = config_with_theme(crate::config::ThemeOverrides {
+            truecolor: Some(true),
+            ..Default::default()
+        });
+        let (t, _) = Theme::load_with(&forced_on, false, false);
+        assert_eq!(t.accent, Color::Rgb(0x7a, 0xa2, 0xf7));
+
+        let forced_off = config_with_theme(crate::config::ThemeOverrides {
+            truecolor: Some(false),
+            ..Default::default()
+        });
+        let (t, _) = Theme::load_with(&forced_off, false, true);
+        assert_eq!(t.accent, Color::Blue, "detection ignored when forced off");
+    }
+
+    #[test]
+    fn no_color_beats_truecolor() {
+        let (t, _) = Theme::load_with(&crate::config::Config::default(), true, true);
+        assert!(t.mono);
+    }
+
+    #[test]
+    fn role_overrides_apply_on_top_of_the_truecolor_base() {
+        let o = crate::config::ThemeOverrides {
+            accent: Some("magenta".into()),
+            ..Default::default()
+        };
+        let (t, warnings) = Theme::load_with(&config_with_theme(o), false, true);
+        assert!(warnings.is_empty());
+        assert_eq!(t.accent, Color::Magenta, "override wins");
+        assert_eq!(t.dim, Color::Rgb(0x56, 0x5f, 0x89), "base stays RGB");
+        assert!(
+            t.persona_pool.contains(&Color::Rgb(0x7a, 0xa2, 0xf7)),
+            "RGB blue rejoins the pool once the accent moves off it"
+        );
+    }
+
+    #[test]
+    fn selection_style_is_bg_tint_normally_and_reversed_in_mono() {
+        let t = Theme::default();
+        let s = t.selection_style();
+        assert_eq!(s.bg, Some(Color::DarkGray));
+        assert!(!s.add_modifier.contains(Modifier::REVERSED));
+
+        let m = Theme::monochrome().selection_style();
+        assert_eq!(m.bg, None);
+        assert!(m.add_modifier.contains(Modifier::REVERSED));
     }
 
     #[test]

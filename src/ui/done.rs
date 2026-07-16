@@ -7,7 +7,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 pub(crate) struct DoneState {
@@ -208,8 +208,11 @@ fn draw_next_box(f: &mut Frame, area: Rect, state: &DoneState, theme: &Theme) {
     } else {
         Style::default().fg(theme.severity_warning)
     };
-    let block = Block::bordered()
-        .title(Span::styled("next", style))
+    let block = crate::ui::theme::bordered()
+        .title(crate::ui::theme::inset_title(
+            Line::from(Span::styled("next", style)),
+            style,
+        ))
         .border_style(style);
     let inner = block.inner(area);
     f.render_widget(block, area);

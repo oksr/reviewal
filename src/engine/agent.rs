@@ -17,7 +17,10 @@ pub enum AgentActivity {
     /// `exact: false` counts are chars-derived estimates — the stream reports
     /// real usage only at message boundaries. Counts are cumulative within one
     /// subprocess invocation and reset with the next (a retry, or round 2).
-    Tokens { count: u64, exact: bool },
+    Tokens {
+        count: u64,
+        exact: bool,
+    },
 }
 
 #[derive(Debug)]

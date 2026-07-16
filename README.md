@@ -200,15 +200,20 @@ crashed after reviews finished show up on Home as resumable.
 
 ## Theming
 
-Colors are ANSI-16 by default, so reviewal inherits your terminal theme. Set
-`NO_COLOR` for monochrome. Every role is overridable in `[theme]` — project
-`.reviewal/config.toml` merges over global `~/.config/reviewal/config.toml`
-per key:
+On terminals that advertise 24-bit color (`COLORTERM=truecolor`), reviewal
+uses a curated dark RGB palette; everywhere else it falls back to ANSI-16 and
+inherits your terminal theme. `truecolor = true` / `false` under `[theme]`
+forces the choice either way (useful under tmux configs that hide
+`COLORTERM`, or on light terminals where the dark palette fits poorly), and
+`NO_COLOR` still wins with monochrome. Every role is overridable in `[theme]`
+— project `.reviewal/config.toml` merges over global
+`~/.config/reviewal/config.toml` per key. The ANSI defaults:
 
 ```toml
 [theme]
-# accent = "blue"                    # app chrome: title, borders, selection, hint keys
+# accent = "blue"                    # app chrome: title, borders, selection pointer, hint keys
 # dim = "gray"                       # secondary text
+# selection_bg = "dark gray"         # selected-row background tint
 # error = "red"
 # status_pending = "gray"            # dashboard agent states (running wears the persona color)
 # status_retrying = "yellow"

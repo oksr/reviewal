@@ -7,7 +7,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::BTreeMap;
 
@@ -522,7 +522,7 @@ fn draw_left(f: &mut Frame, area: Rect, state: &TriageState, theme: &Theme) {
     let selected_style = || {
         Style::default()
             .fg(theme.accent)
-            .add_modifier(Modifier::REVERSED)
+            .patch(theme.selection_style())
     };
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible.len() + 2);
@@ -606,8 +606,8 @@ fn draw_left(f: &mut Frame, area: Rect, state: &TriageState, theme: &Theme) {
             theme.accent_style(),
         )
     };
-    let block = Block::bordered()
-        .title(title)
+    let block = crate::ui::theme::bordered()
+        .title(crate::ui::theme::inset_title(title, theme.dim_style()))
         .border_style(theme.dim_style());
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
@@ -651,11 +651,7 @@ fn draw_right(f: &mut Frame, area: Rect, state: &TriageState, theme: &Theme) {
 
     f.render_widget(
         Paragraph::new(lines)
-            .block(
-                Block::bordered()
-                    .title(title)
-                    .border_style(theme.dim_style()),
-            )
+            .block(theme.panel(&title, false))
             .wrap(Wrap { trim: false })
             .scroll((state.detail_scroll, 0)),
         area,
@@ -727,8 +723,11 @@ fn draw_confirm_finalize(f: &mut Frame, area: Rect, state: &TriageState, theme: 
     let wrapped_rows = estimated_lines(&lines, probe_width.saturating_sub(2));
     let rect = crate::ui::overlay::centered(area, 70, wrapped_rows + 2);
     f.render_widget(Clear, rect);
-    let block = Block::bordered()
-        .title(Span::styled("finalize review?", warn))
+    let block = crate::ui::theme::bordered()
+        .title(crate::ui::theme::inset_title(
+            Line::from(Span::styled("finalize review?", warn)),
+            warn,
+        ))
         .border_style(warn);
     f.render_widget(
         Paragraph::new(lines)

@@ -111,7 +111,8 @@ fn collect_spec_files(paths: &[PathBuf], root: &Path) -> Result<SourceBundle, Ta
         } else {
             String::new()
         };
-        let section = format!("--- BEGIN FILE {name}{clip_note} ---\n{body}\n--- END FILE {name} ---\n");
+        let section =
+            format!("--- BEGIN FILE {name}{clip_note} ---\n{body}\n--- END FILE {name} ---\n");
         if block.len() + section.len() > MAX_TOTAL_BYTES {
             let omitted = paths.len() - i;
             block.push_str(&format!(
@@ -171,7 +172,10 @@ pub(crate) fn precheck_diff(base: Option<&str>, root: &Path) -> Result<(), Targe
     run_git(root, &["rev-parse", "--is-inside-work-tree"]).map_err(|_| TargetError::NotGitRepo)?;
     let range = base.map(|b| format!("{b}...HEAD"));
     let scope = range.as_deref().unwrap_or("HEAD");
-    if run_git(root, &["diff", "--name-only", scope])?.trim().is_empty() {
+    if run_git(root, &["diff", "--name-only", scope])?
+        .trim()
+        .is_empty()
+    {
         return Err(TargetError::EmptyDiff);
     }
     Ok(())
