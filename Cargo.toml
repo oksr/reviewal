@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Adversarial multi-agent review TUI"
 license = "MIT"
+repository = "https://github.com/oksr/reviewal"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"
@@ -20,3 +22,8 @@ toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

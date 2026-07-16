@@ -34,13 +34,29 @@ what was ruled out and why, and won't re-litigate it.
 
 ## Install
 
+Prebuilt binaries (macOS and Linux, no Rust required):
+
 ```bash
+curl -LsSf https://github.com/oksr/reviewal/releases/latest/download/reviewal-installer.sh | sh
+```
+
+With a Rust toolchain, from [crates.io](https://crates.io/crates/reviewal):
+
+```bash
+cargo install reviewal       # or `cargo binstall reviewal` to skip the compile
+```
+
+From source:
+
+```bash
+git clone https://github.com/oksr/reviewal
+cd reviewal
 cargo install --path .
 ```
 
-Requires the `claude` CLI on PATH (a version with `--json-schema`, `--safe-mode`,
-and `--tools`; preflight checks and tells you if yours is too old), and `git` for
-diff reviews.
+Requires the [`claude` CLI](https://claude.com/claude-code) on PATH (a version
+with `--json-schema`, `--safe-mode`, and `--tools`; preflight checks and tells
+you if yours is too old), and `git` for diff reviews.
 
 ## Quickstart
 
@@ -244,4 +260,4 @@ REVIEWAL_LIVE=1 cargo test --test live  # one real end-to-end run (~2 model call
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
