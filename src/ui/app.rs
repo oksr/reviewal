@@ -122,9 +122,10 @@ fn home_screen(
         targets: crate::engine::target::detect_targets(app_root),
         spec_count: crate::ui::composer::collect_spec_files(app_root).len(),
         runs,
-        zone: crate::ui::home::HomeZone::Launcher,
+        tab: crate::ui::home::HomeTab::Start,
         launcher_idx: 0,
         history_idx: 0,
+        personas: crate::ui::personas::PersonaManager::new(app_root, config, None),
         warnings,
         skill_installed: crate::skill::ingest_skill_installed(app_root),
         defaults_code: code_personas.iter().map(|p| p.name.clone()).collect(),
@@ -153,6 +154,7 @@ impl App {
     fn persona_mgr(&mut self) -> Option<&mut crate::ui::personas::PersonaManager> {
         match &mut self.screen {
             Screen::Composer(state) => Some(&mut state.mgr),
+            Screen::Home(state) => Some(&mut state.personas),
             _ => None,
         }
     }

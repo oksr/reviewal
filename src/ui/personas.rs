@@ -7,8 +7,12 @@
 
 use crate::engine::model::TargetKind;
 use crate::engine::persona::{available, available_all, Persona};
-use crate::ui::theme::BUILTIN_SLOTS;
+use crate::ui::theme::{Theme, BUILTIN_SLOTS};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Clear, Paragraph};
+use ratatui::Frame;
 use std::path::{Path, PathBuf};
 
 pub(crate) struct PersonaChoice {
@@ -665,4 +669,60 @@ pub(crate) fn armed_delete_label(name: &str, global_copy_exists: bool) -> String
     } else {
         format!("again deletes {name} \u{2014} any other key cancels")
     }
+}
+
+/// The `v` pager: full source of the highlighted persona, centered modal.
+pub(crate) fn draw_pager(f: &mut Frame, area: Rect, mgr: &PersonaManager, theme: &Theme) {
+    let Some(p) = &mgr.pager else { return };
+    let rect = crate::ui::overlay::centered(area, 80, area.height.saturating_sub(4).max(5));
+    f.render_widget(Clear, rect);
+    let block = theme
+        .panel(&p.title, true)
+        .title_bottom(
+            theme
+                .hints(&[("j/k", "scroll"), ("esc", "close")])
+                .right_aligned(),
+        )
+        .border_style(theme.accent_style());
+    f.render_widget(
+        Paragraph::new(p.text.as_str())
+            .block(block)
+            .scroll((p.scroll, 0)),
+        rect,
+    );
+}
+
+/// The `[p]/[g]` scope prompt for materialize/new/duplicate.
+pub(crate) fn draw_scope(f: &mut Frame, area: Rect, mgr: &PersonaManager, theme: &Theme) {
+    let Some(op) = &mgr.scope_prompt else {
+        return;
+    };
+    let title = match op {
+        ScopeOp::Materialize { name } => format!("copy {name} to:"),
+        ScopeOp::New => "new persona in:".to_string(),
+        ScopeOp::Duplicate { row } => format!(
+            "copy {} to:",
+            mgr.personas
+                .get(*row)
+                .map(|c| c.persona.name.as_str())
+                .unwrap_or("persona")
+        ),
+    };
+    let rect = crate::ui::overlay::centered(area, 50, 5);
+    f.render_widget(Clear, rect);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("p", theme.accent_style()),
+            Span::styled("  project   .reviewal/personas/", theme.dim_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("g", theme.accent_style()),
+            Span::styled(
+                "  global    ~/.config/reviewal/personas/",
+                theme.dim_style(),
+            ),
+        ]),
+        theme.hints(&[("esc", "cancel")]),
+    ];
+    f.render_widget(Paragraph::new(lines).block(theme.panel(&title, true)), rect);
 }

@@ -1,11 +1,10 @@
 use crate::config::Config;
 use crate::engine::model::TargetKind;
-use crate::engine::persona::{available, Persona};
 use crate::engine::run::RunSpec;
 use crate::engine::target::{detect_targets, DetectedTarget, Target};
 use crate::ui::app::Transition;
 use crate::ui::format::{truncate_end, truncate_path_start};
-use crate::ui::theme::{validate_persona_colors, Theme, BUILTIN_SLOTS};
+use crate::ui::theme::Theme;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -122,9 +121,10 @@ impl PickerState {
 }
 
 pub(crate) use crate::ui::personas::{
-    armed_delete_label, invalid_tag, provenance_tag, EditorRequest, PagerState, PersonaChoice,
-    PersonaManager, ScopeOp,
+    armed_delete_label, invalid_tag, provenance_tag, PersonaChoice, PersonaManager,
 };
+#[cfg(test)]
+pub(crate) use crate::ui::personas::{EditorRequest, ScopeOp};
 
 pub(crate) struct ComposerState {
     root: PathBuf,
@@ -193,7 +193,7 @@ impl ComposerState {
                 None => (model_custom_index(), m.to_string()),
             },
         };
-        let state = ComposerState {
+        ComposerState {
             root: root.to_path_buf(),
             timeout_secs: config.timeout_secs,
             claude_bin: config.claude_bin.clone(),
@@ -216,8 +216,7 @@ impl ComposerState {
             },
             mgr: PersonaManager::new(root, config, Some(kind)),
             error: None,
-        };
-        state
+        }
     }
 
     fn rebuild_personas_for(&mut self, kind: TargetKind) {
@@ -270,7 +269,8 @@ impl ComposerState {
             None => Target::SpecFiles(self.chosen_specs.clone()),
         };
         let personas = self
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .filter(|c| c.enabled)
             .map(|c| c.persona.clone())
@@ -404,6 +404,7 @@ impl ComposerState {
         None
     }
 
+    #[cfg(test)]
     pub(crate) fn on_editor_return(&mut self, req: EditorRequest, exit_ok: bool) {
         self.mgr.on_editor_return(req, exit_ok);
     }
@@ -856,7 +857,8 @@ fn reviewer_expansion(state: &ComposerState, theme: &Theme, budget: usize) -> Ve
     const PREFIX: usize = 3 + 1 + 12 + 2;
     const TAG_GUTTER: usize = 2;
     let mut lines: Vec<Line<'static>> = state
-        .mgr.personas
+        .mgr
+        .personas
         .iter()
         .enumerate()
         .map(|(i, c)| {
@@ -1194,7 +1196,8 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, state: &ComposerState, theme: &The
                         armed_delete_label(&c.persona.name, state.mgr.armed_delete_shadows_global)
                     } else {
                         let stem = state
-                            .mgr.invalid
+                            .mgr
+                            .invalid
                             .get(armed.saturating_sub(state.mgr.personas.len()))
                             .and_then(|r| {
                                 r.path.file_stem().map(|s| s.to_string_lossy().into_owned())
@@ -1239,58 +1242,11 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, state: &ComposerState, theme: &The
 }
 
 fn draw_pager(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) {
-    let Some(p) = &state.mgr.pager else { return };
-    let rect = crate::ui::overlay::centered(area, 80, area.height.saturating_sub(4).max(5));
-    f.render_widget(Clear, rect);
-    let block = theme
-        .panel(&p.title, true)
-        .title_bottom(
-            theme
-                .hints(&[("j/k", "scroll"), ("esc", "close")])
-                .right_aligned(),
-        )
-        .border_style(theme.accent_style());
-    f.render_widget(
-        Paragraph::new(p.text.as_str())
-            .block(block)
-            .scroll((p.scroll, 0)),
-        rect,
-    );
+    crate::ui::personas::draw_pager(f, area, &state.mgr, theme);
 }
 
 fn draw_scope(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) {
-    let Some(op) = &state.mgr.scope_prompt else {
-        return;
-    };
-    let title = match op {
-        ScopeOp::Materialize { name } => format!("copy {name} to:"),
-        ScopeOp::New => "new persona in:".to_string(),
-        ScopeOp::Duplicate { row } => format!(
-            "copy {} to:",
-            state
-                .mgr.personas
-                .get(*row)
-                .map(|c| c.persona.name.as_str())
-                .unwrap_or("persona")
-        ),
-    };
-    let rect = crate::ui::overlay::centered(area, 50, 5);
-    f.render_widget(Clear, rect);
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("p", theme.accent_style()),
-            Span::styled("  project   .reviewal/personas/", theme.dim_style()),
-        ]),
-        Line::from(vec![
-            Span::styled("g", theme.accent_style()),
-            Span::styled(
-                "  global    ~/.config/reviewal/personas/",
-                theme.dim_style(),
-            ),
-        ]),
-        theme.hints(&[("esc", "cancel")]),
-    ];
-    f.render_widget(Paragraph::new(lines).block(theme.panel(&title, true)), rect);
+    crate::ui::personas::draw_scope(f, area, &state.mgr, theme);
 }
 
 #[cfg(test)]
@@ -1457,7 +1413,8 @@ mod tests {
         c.handle_key(key(' ')); // toggle cursored (first) persona off
         c.handle_key(key_code(KeyCode::Esc)); // close the editor
         let disabled: Vec<String> = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .filter(|p| !p.enabled)
             .map(|p| p.persona.name.clone())
@@ -1465,7 +1422,8 @@ mod tests {
         assert!(!disabled.is_empty(), "the toggle must have taken effect");
         c.handle_key(key('t'));
         let still_disabled: Vec<String> = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .filter(|p| !p.enabled)
             .map(|p| p.persona.name.clone())
@@ -1957,7 +1915,8 @@ mod tests {
         .unwrap();
         let c = ComposerState::new(dir.path(), &Config::default(), None, false);
         assert!(
-            c.mgr.warnings
+            c.mgr
+                .warnings
                 .iter()
                 .any(|w| w.contains("bad") && w.contains("blurple")),
             "warnings: {:?}",
@@ -1984,7 +1943,8 @@ mod tests {
 
         let c = ComposerState::new(dir.path(), &Config::default(), None, false);
         let prover = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .find(|p| p.persona.name == "prover")
             .unwrap();
@@ -1997,7 +1957,8 @@ mod tests {
             "a custom persona shadowing a builtin stays default-ON"
         );
         let newbie = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .find(|p| p.persona.name == "newbie")
             .unwrap();
@@ -2125,7 +2086,8 @@ mod tests {
 
         let tag_of = |name: &str| {
             let p = &c
-                .mgr.personas
+                .mgr
+                .personas
                 .iter()
                 .find(|x| x.persona.name == name)
                 .unwrap()
@@ -2135,11 +2097,15 @@ mod tests {
         assert_eq!(tag_of("advocate"), "built-in");
         assert_eq!(tag_of("skeptic"), "edited (project)");
         assert_eq!(tag_of("novel"), "project");
-        assert_eq!(invalid_tag(&c.mgr, &c.mgr.invalid[0].path), "invalid (project)");
+        assert_eq!(
+            invalid_tag(&c.mgr, &c.mgr.invalid[0].path),
+            "invalid (project)"
+        );
 
         // Global variants are pure functions of the path — no env needed.
         let mut p = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .find(|x| x.persona.name == "novel")
             .unwrap()
@@ -2291,14 +2257,18 @@ mod tests {
         .unwrap();
         let mut c = reviewers_editing(dir.path());
         let i = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .position(|p| p.persona.name == "mine")
             .unwrap();
         c.mgr.cursor = i;
         c.mgr.personas[i].enabled = true;
         c.handle_key(crate::ui::test_keys::key('e'));
-        assert!(c.mgr.scope_prompt.is_none(), "existing file: no [p]/[g] prompt");
+        assert!(
+            c.mgr.scope_prompt.is_none(),
+            "existing file: no [p]/[g] prompt"
+        );
         let req = c.mgr.pending_editor.as_ref().expect("request staged");
         assert_eq!(req.path, pdir.join("mine.md"));
         assert!(!req.created, "edit of an existing file never marks created");
@@ -2339,7 +2309,8 @@ mod tests {
         let mut c2 = reviewers_editing(dir.path());
         // The file shadows but is broken → builtin row is back; e on it → prompt → p.
         let bi = c2
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .position(|p| p.persona.name == name && p.persona.builtin);
         if let Some(bi) = bi {
@@ -2389,7 +2360,12 @@ mod tests {
         );
 
         // Duplicate a builtin.
-        let bi = c.mgr.personas.iter().position(|p| p.persona.builtin).unwrap();
+        let bi = c
+            .mgr
+            .personas
+            .iter()
+            .position(|p| p.persona.builtin)
+            .unwrap();
         c.mgr.cursor = bi;
         let base = c.mgr.personas[bi].persona.name.clone();
         c.handle_key(crate::ui::test_keys::key('d'));
@@ -2491,13 +2467,15 @@ mod tests {
         assert!(!path.exists(), "file renamed to match frontmatter");
         assert!(pdir.join("redteam.md").exists());
         let row = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .find(|x| x.persona.name == "redteam")
             .expect("loaded");
         assert!(row.enabled, "auto-enable lands on the post-rename persona");
         let idx = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .position(|x| x.persona.name == "redteam")
             .unwrap();
@@ -2573,7 +2551,8 @@ mod tests {
             true,
         );
         assert!(
-            c.mgr.warnings
+            c.mgr
+                .warnings
                 .iter()
                 .any(|w| w.contains("codey") && w.contains("hidden")),
             "{:?}",
@@ -2593,7 +2572,8 @@ mod tests {
             true,
         );
         let inv = c
-            .mgr.invalid
+            .mgr
+            .invalid
             .iter()
             .position(|r| r.path == path)
             .expect("invalid row built");
@@ -2616,7 +2596,8 @@ mod tests {
         .unwrap();
         let mut c = reviewers_editing(dir.path());
         let i = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .position(|p| p.persona.name == "skeptic")
             .unwrap();
@@ -2630,7 +2611,8 @@ mod tests {
         c.handle_key(crate::ui::test_keys::key('x'));
         assert!(!pdir.join("skeptic.md").exists(), "file deleted");
         let back = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .find(|p| p.persona.name == "skeptic")
             .unwrap();
@@ -2699,7 +2681,8 @@ mod tests {
         .unwrap();
         let c = ComposerState::new(dir.path(), &config_with_global(global.path()), None, false);
         let row = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .find(|p| p.persona.name == "housekeeper")
             .expect("persona from the injected global dir is loaded");
@@ -2738,7 +2721,8 @@ mod tests {
         c.field = Field::Reviewers;
         c.editing = true;
         let i = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .position(|p| p.persona.name == "skeptic")
             .unwrap();
@@ -2787,7 +2771,8 @@ mod tests {
         .unwrap();
         let mut c = reviewers_editing(dir.path());
         let i = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .position(|p| p.persona.name == "skeptic")
             .unwrap();
@@ -2817,7 +2802,8 @@ mod tests {
         .unwrap();
         let mut c = reviewers_editing(dir.path());
         let i = c
-            .mgr.personas
+            .mgr
+            .personas
             .iter()
             .position(|p| p.persona.name == "novel")
             .unwrap();

@@ -3,10 +3,10 @@ pub mod composer;
 pub mod dashboard;
 pub mod done;
 pub(crate) mod editor;
-pub(crate) mod personas;
 pub mod format;
 pub mod home;
 pub mod overlay;
+pub(crate) mod personas;
 pub mod theme;
 pub mod triage;
 
