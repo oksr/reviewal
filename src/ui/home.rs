@@ -322,7 +322,7 @@ fn draw_defaults(f: &mut Frame, area: Rect, state: &HomeState, theme: &Theme) {
     } else {
         &state.defaults_code
     };
-    let mut spans = vec![Span::styled("  defaults: ", theme.dim_style())];
+    let mut spans = vec![Span::styled(" Personas: ", theme.dim_style())];
     for (i, name) in names.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", theme.dim_style()));
