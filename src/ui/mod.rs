@@ -3,6 +3,7 @@ pub mod composer;
 pub mod dashboard;
 pub mod done;
 pub(crate) mod editor;
+pub(crate) mod personas;
 pub mod format;
 pub mod home;
 pub mod overlay;
@@ -106,27 +107,27 @@ pub fn run_tui(
                 }
             }
         }
-        // Staged editor requests must run here, between draws — never mid-draw.
-        if let Screen::Composer(state) = &mut app.screen {
-            if let Some(req) = state.pending_editor.take() {
-                let cmd = editor::resolve_editor();
-                let outcome = match editor::SuspendGuard::new() {
-                    Ok(_suspended) => editor::run_editor(&cmd, &req.path)
-                        .map_err(|e| format!("failed to run {cmd}: {e}")),
-                    Err(e) => Err(format!("terminal suspend failed: {e}")),
-                }; // _suspended drops here: terminal restored on every path
-                terminal.clear()?; // force a full repaint after the editor
-                match outcome {
-                    Ok(editor::EditorExit::Clean) => state.on_editor_return(req, true),
-                    Ok(editor::EditorExit::Failed) => state.on_editor_return(req, false),
-                    Ok(editor::EditorExit::NotFound) => {
-                        state.on_editor_return(req, false); // created files cleaned up
-                        state.notice = Some("no editor found \u{2014} set $EDITOR".into());
-                    }
-                    Err(msg) => {
-                        state.on_editor_return(req, false);
-                        state.notice = Some(msg);
-                    }
+        // Staged editor requests must run here, between draws — never
+        // mid-draw. Whichever screen owns a persona manager (composer or
+        // home) staged the request; App dispatches back to it.
+        if let Some(req) = app.take_pending_editor() {
+            let cmd = editor::resolve_editor();
+            let outcome = match editor::SuspendGuard::new() {
+                Ok(_suspended) => editor::run_editor(&cmd, &req.path)
+                    .map_err(|e| format!("failed to run {cmd}: {e}")),
+                Err(e) => Err(format!("terminal suspend failed: {e}")),
+            }; // _suspended drops here: terminal restored on every path
+            terminal.clear()?; // force a full repaint after the editor
+            match outcome {
+                Ok(editor::EditorExit::Clean) => app.editor_returned(req, true),
+                Ok(editor::EditorExit::Failed) => app.editor_returned(req, false),
+                Ok(editor::EditorExit::NotFound) => {
+                    app.editor_returned(req, false); // created files cleaned up
+                    app.set_editor_notice("no editor found \u{2014} set $EDITOR".into());
+                }
+                Err(msg) => {
+                    app.editor_returned(req, false);
+                    app.set_editor_notice(msg);
                 }
             }
         }

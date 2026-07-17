@@ -121,70 +121,21 @@ impl PickerState {
     }
 }
 
-pub(crate) struct PersonaChoice {
-    pub persona: Persona,
-    pub enabled: bool,
-}
-
-/// One unparseable persona file: checklist row `personas.len() + index`.
-pub(crate) struct InvalidRow {
-    pub path: PathBuf,
-    pub error: String,
-}
-
-pub(crate) struct PagerState {
-    pub title: String,
-    pub text: String,
-    pub scroll: u16,
-}
-
-/// `created` is true ONLY if the staging operation itself wrote the file —
-/// materialize onto an existing path stages false, so a nonzero editor
-/// exit can never delete a pre-existing user file.
-#[derive(Debug, PartialEq)]
-pub(crate) struct EditorRequest {
-    pub path: PathBuf,
-    pub created: bool,
-    pub persona_name: String,
-    /// Enabled flag to reapply by path after reload (edit/materialize).
-    pub prior_enabled: Option<bool>,
-    /// `n`/`d`: enable the resulting persona on successful return.
-    pub auto_enable: bool,
-}
-
-pub(crate) enum ScopeOp {
-    Materialize { name: String },
-    New,
-    Duplicate { row: usize },
-}
-
-/// A custom persona shadowing a builtin (same name as one of
-/// [`BUILTIN_SLOTS`]) stays default-ON, same as the builtin it replaces; a
-/// non-shadowing custom persona defaults off.
-fn default_enabled(p: &Persona) -> bool {
-    BUILTIN_SLOTS.contains(&p.name.as_str())
-}
+pub(crate) use crate::ui::personas::{
+    armed_delete_label, invalid_tag, provenance_tag, EditorRequest, PagerState, PersonaChoice,
+    PersonaManager, ScopeOp,
+};
 
 pub(crate) struct ComposerState {
     root: PathBuf,
     timeout_secs: u64,
     claude_bin: String,
     config_model: Option<String>,
-    /// Injected from [`Config::persona_dirs`] at construction — this state
-    /// never reads ambient environment, which is what keeps every composer
-    /// test hermetic with a `Config::default()`.
-    pub persona_dirs: Vec<PathBuf>,
-    /// Injected from [`Config`], never ambient env; `None` under
-    /// `Config::default()`.
-    pub global_persona_dir: Option<PathBuf>,
     pub targets: Vec<DetectedTarget>,
     /// `Some(i)` = `targets[i]`; `None` = spec files.
     pub target_choice: Option<usize>,
     pub spec_files: Vec<PathBuf>,
     pub chosen_specs: Vec<PathBuf>,
-    pub personas: Vec<PersonaChoice>,
-    pub invalid: Vec<InvalidRow>,
-    pub persona_cursor: usize,
     /// Cursor inside the target editor: `0..targets.len()` are detected
     /// diff targets, `targets.len()` is the spec-files row.
     pub target_cursor: usize,
@@ -200,23 +151,11 @@ pub(crate) struct ComposerState {
     pub cross_review: bool,
     pub field: Field,
     pub picker: Option<PickerState>,
-    pub pager: Option<PagerState>,
-    /// A file the `run_tui` loop must open in $EDITOR after this keypress.
-    pub pending_editor: Option<EditorRequest>,
-    pub scope_prompt: Option<ScopeOp>,
-    /// One-shot message rendered in the error row when there's no active
-    /// error; cleared at the top of every `handle_key` call.
-    pub notice: Option<String>,
+    /// Persona rows + management verbs, shared with the home personas tab;
+    /// carries the persona dirs, pager, staged editor request, scope
+    /// prompt, notice, and armed-delete state.
+    pub mgr: PersonaManager,
     pub error: Option<String>,
-    pub warnings: Vec<String>,
-    /// The checklist row awaiting a confirming `x`: `Some(row)` while armed.
-    /// Any key other than a matching `x` or `Esc` disarms it (and, except
-    /// for `Esc`, still acts normally).
-    pub armed_delete: Option<usize>,
-    /// True when the armed row shadows BOTH a builtin slot AND a global
-    /// copy: deleting resurfaces the global copy, not the builtin, so the
-    /// footer must say so. Computed at arm time so tests can force it.
-    pub armed_delete_shadows_global: bool,
 }
 
 impl ComposerState {
@@ -254,10 +193,8 @@ impl ComposerState {
                 None => (model_custom_index(), m.to_string()),
             },
         };
-        let mut state = ComposerState {
+        let state = ComposerState {
             root: root.to_path_buf(),
-            persona_dirs: config.persona_dirs(root),
-            global_persona_dir: config.global_persona_dir.clone(),
             timeout_secs: config.timeout_secs,
             claude_bin: config.claude_bin.clone(),
             config_model: config.model.clone(),
@@ -265,9 +202,6 @@ impl ComposerState {
             target_choice,
             spec_files,
             chosen_specs,
-            personas: Vec::new(),
-            invalid: Vec::new(),
-            persona_cursor: 0,
             target_cursor: 0,
             model_idx,
             model_custom,
@@ -280,61 +214,19 @@ impl ComposerState {
             } else {
                 None
             },
-            pager: None,
-            pending_editor: None,
-            scope_prompt: None,
-            notice: None,
+            mgr: PersonaManager::new(root, config, Some(kind)),
             error: None,
-            warnings: Vec::new(),
-            armed_delete: None,
-            armed_delete_shadows_global: false,
         };
-        // With `personas` still empty, rebuild's by-name preservation map is
-        // empty, so every persona falls through to `default_enabled` — the
-        // seeding behavior `new` needs.
-        state.rebuild_personas_for(kind);
         state
     }
 
-    /// Re-populates `personas` for `kind`, preserving each persona's current
-    /// `enabled` by name and using [`default_enabled`] only for
-    /// newly-appearing names.
     fn rebuild_personas_for(&mut self, kind: TargetKind) {
-        let (personas, failures) = available(kind, &self.persona_dirs);
-        let mut warnings: Vec<String> = failures.iter().map(|f| f.to_string()).collect();
-        warnings.extend(validate_persona_colors(&personas));
-        self.warnings = warnings;
-        self.invalid = failures
-            .into_iter()
-            .map(|f| InvalidRow {
-                path: f.path,
-                error: f.error,
-            })
-            .collect();
-        let prev: std::collections::HashMap<String, bool> = self
-            .personas
-            .iter()
-            .map(|c| (c.persona.name.clone(), c.enabled))
-            .collect();
-        self.personas = personas
-            .into_iter()
-            .map(|p| {
-                let enabled = prev
-                    .get(&p.name)
-                    .copied()
-                    .unwrap_or_else(|| default_enabled(&p));
-                PersonaChoice {
-                    enabled,
-                    persona: p,
-                }
-            })
-            .collect();
-        self.persona_cursor = self.persona_cursor.min(self.row_count().saturating_sub(1));
+        self.mgr.rebuild_for(kind);
     }
 
     /// Total checklist rows: valid personas, then invalid files.
     pub(crate) fn row_count(&self) -> usize {
-        self.personas.len() + self.invalid.len()
+        self.mgr.row_count()
     }
 
     pub(crate) fn current_kind(&self) -> TargetKind {
@@ -363,7 +255,7 @@ impl ComposerState {
     /// Split so the border render can dim the prose but keep the call count
     /// at normal weight.
     pub(crate) fn cost_parts(&self) -> (String, String) {
-        let n = self.personas.iter().filter(|c| c.enabled).count();
+        let n = self.mgr.personas.iter().filter(|c| c.enabled).count();
         let r = 1 + usize::from(self.cross_review);
         let s = if r == 1 { "" } else { "s" };
         (
@@ -378,7 +270,7 @@ impl ComposerState {
             None => Target::SpecFiles(self.chosen_specs.clone()),
         };
         let personas = self
-            .personas
+            .mgr.personas
             .iter()
             .filter(|c| c.enabled)
             .map(|c| c.persona.clone())
@@ -396,15 +288,17 @@ impl ComposerState {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Option<Transition> {
-        self.notice = None;
+        self.mgr.notice = None;
         if self.picker.is_some() {
             return self.handle_picker_key(key);
         }
-        if self.pager.is_some() {
-            return self.handle_pager_key(key);
+        if self.mgr.pager.is_some() {
+            self.mgr.handle_pager_key(key);
+            return None;
         }
-        if self.scope_prompt.is_some() {
-            return self.handle_scope_key(key);
+        if self.mgr.scope_prompt.is_some() {
+            self.mgr.handle_scope_key(key);
+            return None;
         }
         if self.model_input {
             return self.handle_model_input_key(key);
@@ -413,22 +307,6 @@ impl ComposerState {
             return self.handle_edit_key(key);
         }
         self.handle_fields_key(key)
-    }
-
-    fn handle_pager_key(&mut self, key: KeyEvent) -> Option<Transition> {
-        let Some(p) = &mut self.pager else {
-            return None;
-        };
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                let max = p.text.lines().count().saturating_sub(1) as u16;
-                p.scroll = p.scroll.saturating_add(1).min(max);
-            }
-            KeyCode::Char('k') | KeyCode::Up => p.scroll = p.scroll.saturating_sub(1),
-            KeyCode::Esc | KeyCode::Char('v') => self.pager = None,
-            _ => {}
-        }
-        None
     }
 
     fn handle_fields_key(&mut self, key: KeyEvent) -> Option<Transition> {
@@ -489,38 +367,20 @@ impl ComposerState {
     fn handle_edit_key(&mut self, key: KeyEvent) -> Option<Transition> {
         // Armed-delete grammar: x confirms; esc is consumed and only
         // disarms; any other key disarms and then acts normally.
-        if let Some(armed) = self.armed_delete.take() {
-            self.armed_delete_shadows_global = false;
-            match key.code {
-                KeyCode::Char('x') if armed == self.persona_cursor => {
-                    self.confirm_delete(armed);
-                    return None;
-                }
-                KeyCode::Esc => return None,
-                _ => {}
-            }
+        if self.mgr.handle_armed_key(key) {
+            return None;
         }
         match key.code {
-            KeyCode::Char('v') if self.field == Field::Reviewers => self.open_pager(),
-            KeyCode::Char('e') if self.field == Field::Reviewers => self.begin_edit(),
-            KeyCode::Char('n') if self.field == Field::Reviewers => {
-                self.scope_prompt = Some(ScopeOp::New);
+            KeyCode::Char('v' | 'e' | 'n' | 'd' | 'x') if self.field == Field::Reviewers => {
+                self.mgr.handle_verb_key(key);
             }
-            KeyCode::Char('d') if self.field == Field::Reviewers => {
-                if self.persona_cursor < self.personas.len() {
-                    self.scope_prompt = Some(ScopeOp::Duplicate {
-                        row: self.persona_cursor,
-                    });
-                }
-            }
-            KeyCode::Char('x') if self.field == Field::Reviewers => self.arm_delete(),
             KeyCode::Char('j') | KeyCode::Down => self.move_edit_cursor(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_edit_cursor(-1),
             KeyCode::Char(' ') => match self.field {
                 Field::Reviewers => {
                     // Rows `personas.len()..row_count()` are invalid-file
                     // rows: space is a no-op there, not a toggle.
-                    if let Some(c) = self.personas.get_mut(self.persona_cursor) {
+                    if let Some(c) = self.mgr.personas.get_mut(self.mgr.cursor) {
                         c.enabled = !c.enabled;
                     }
                 }
@@ -544,393 +404,15 @@ impl ComposerState {
         None
     }
 
-    /// Read-only source of the highlighted row — builtin embedded text or
-    /// the file's contents. Never writes.
-    fn open_pager(&mut self) {
-        let i = self.persona_cursor;
-        let (title, text) = if let Some(c) = self.personas.get(i) {
-            let text = match &c.persona.source {
-                None => match crate::engine::persona::builtin_source(&c.persona.name) {
-                    Some(t) => t.to_string(),
-                    None => return,
-                },
-                Some(path) => match std::fs::read_to_string(path) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.notice = Some(format!("{}: {e}", path.display()));
-                        return;
-                    }
-                },
-            };
-            (
-                format!(
-                    "{} \u{2014} {}",
-                    c.persona.name,
-                    provenance_tag(self, &c.persona)
-                ),
-                text,
-            )
-        } else if let Some(row) = self.invalid.get(i.saturating_sub(self.personas.len())) {
-            match std::fs::read_to_string(&row.path) {
-                Ok(t) => (
-                    format!(
-                        "{} \u{2014} {}",
-                        row.path.display(),
-                        invalid_tag(self, &row.path)
-                    ),
-                    t,
-                ),
-                Err(e) => {
-                    self.notice = Some(format!("{}: {e}", row.path.display()));
-                    return;
-                }
-            }
-        } else {
-            return;
-        };
-        self.pager = Some(PagerState {
-            title,
-            text,
-            scroll: 0,
-        });
-    }
-
-    /// `e`: existing files open directly; a builtin prompts for scope and
-    /// materializes (write-if-absent) once a directory is chosen.
-    fn begin_edit(&mut self) {
-        let i = self.persona_cursor;
-        if let Some(c) = self.personas.get(i) {
-            match &c.persona.source {
-                Some(path) => {
-                    self.pending_editor = Some(EditorRequest {
-                        path: path.clone(),
-                        created: false,
-                        persona_name: c.persona.name.clone(),
-                        prior_enabled: Some(c.enabled),
-                        auto_enable: false,
-                    });
-                }
-                None => {
-                    self.scope_prompt = Some(ScopeOp::Materialize {
-                        name: c.persona.name.clone(),
-                    });
-                }
-            }
-        } else if let Some(row) = self.invalid.get(i.saturating_sub(self.personas.len())) {
-            let stem = row
-                .path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            self.pending_editor = Some(EditorRequest {
-                path: row.path.clone(),
-                created: false,
-                persona_name: stem,
-                prior_enabled: None,
-                auto_enable: false,
-            });
-        }
-    }
-
-    /// Arms the highlighted row for delete, unless it's a pure builtin (no
-    /// on-disk file to delete) — those get a notice instead.
-    fn arm_delete(&mut self) {
-        let i = self.persona_cursor;
-        if let Some(c) = self.personas.get(i) {
-            if c.persona.source.is_some() {
-                self.armed_delete_shadows_global = shadows_global_copy(self, &c.persona);
-                self.armed_delete = Some(i);
-            } else {
-                self.notice = Some("built-in \u{2014} e edits a copy".into());
-            }
-        } else if i < self.row_count() {
-            self.armed_delete_shadows_global = false; // invalid rows never shadow
-            self.armed_delete = Some(i); // invalid rows always have a file
-        }
-    }
-
-    /// Confirmed `x`: deletes the row's on-disk file. A custom persona
-    /// shadowing a builtin resets to the builtin (it just reappears after
-    /// the rebuild); a non-shadowing custom or invalid file is gone for good.
-    fn confirm_delete(&mut self, row: usize) {
-        let path = if let Some(c) = self.personas.get(row) {
-            c.persona.source.clone()
-        } else {
-            self.invalid
-                .get(row.saturating_sub(self.personas.len()))
-                .map(|r| r.path.clone())
-        };
-        let Some(path) = path else { return };
-        match std::fs::remove_file(&path) {
-            Ok(()) => self.rebuild_personas_for(self.current_kind()),
-            Err(e) => self.notice = Some(format!("delete failed: {e}")),
-        }
-    }
-
-    fn handle_scope_key(&mut self, key: KeyEvent) -> Option<Transition> {
-        let dir = match key.code {
-            KeyCode::Char('p') => self.root.join(".reviewal").join("personas"),
-            KeyCode::Char('g') => match self.global_persona_dir.clone() {
-                Some(d) => d,
-                None => {
-                    self.scope_prompt = None;
-                    self.notice = Some("no global config directory available".into());
-                    return None;
-                }
-            },
-            KeyCode::Esc => {
-                self.scope_prompt = None;
-                return None;
-            }
-            _ => return None,
-        };
-        let op = self.scope_prompt.take()?;
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.notice = Some(format!("cannot create {}: {e}", dir.display()));
-            return None;
-        }
-        self.perform_scope_op(op, &dir);
-        None
-    }
-
-    fn taken_slugs(&self, dir: &Path) -> Vec<String> {
-        let mut taken: Vec<String> = self
-            .personas
-            .iter()
-            .map(|c| c.persona.name.clone())
-            .collect();
-        taken.extend(
-            self.invalid
-                .iter()
-                .filter_map(|r| r.path.file_stem().map(|s| s.to_string_lossy().into_owned())),
-        );
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            taken.extend(entries.filter_map(|e| {
-                let p = e.ok()?.path();
-                (p.extension()? == "md").then(|| {
-                    p.file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                })
-            }));
-        }
-        taken
-    }
-
-    fn perform_scope_op(&mut self, op: ScopeOp, dir: &Path) {
-        use crate::engine::persona::{
-            builtin_source, rewrite_frontmatter_name, unique_slug, NEW_PERSONA_TEMPLATE,
-        };
-        match op {
-            ScopeOp::Materialize { name } => {
-                let path = dir.join(format!("{name}.md"));
-                let created = if path.exists() {
-                    false // open the existing (possibly broken) shadow as-is — never overwrite
-                } else {
-                    let Some(src) = builtin_source(&name) else {
-                        self.notice = Some(format!("no builtin source for {name}"));
-                        return;
-                    };
-                    if let Err(e) = std::fs::write(&path, src) {
-                        self.notice = Some(format!("cannot write {}: {e}", path.display()));
-                        return;
-                    }
-                    true
-                };
-                let prior = self
-                    .personas
-                    .iter()
-                    .find(|c| c.persona.name == name)
-                    .map(|c| c.enabled);
-                self.pending_editor = Some(EditorRequest {
-                    path,
-                    created,
-                    persona_name: name,
-                    prior_enabled: prior,
-                    auto_enable: false,
-                });
-            }
-            ScopeOp::New => {
-                let slug = unique_slug("new-persona", &self.taken_slugs(dir));
-                let text = match rewrite_frontmatter_name(NEW_PERSONA_TEMPLATE, &slug) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.notice = Some(format!("template error: {e}"));
-                        return;
-                    }
-                };
-                let path = dir.join(format!("{slug}.md"));
-                // taken_slugs() is not a freshness check: case-insensitive
-                // filesystems can hide a same-named file from the string
-                // match, and its read_dir errors are swallowed. Re-check the
-                // exact path so a real file is never clobbered (its
-                // `created: true` staging would delete it on a nonzero
-                // editor exit).
-                if path.exists() {
-                    self.notice = Some(format!(
-                        "{} already exists — not overwriting",
-                        path.display()
-                    ));
-                    return;
-                }
-                if let Err(e) = std::fs::write(&path, text) {
-                    self.notice = Some(format!("cannot write {}: {e}", path.display()));
-                    return;
-                }
-                self.pending_editor = Some(EditorRequest {
-                    path,
-                    created: true,
-                    persona_name: slug,
-                    prior_enabled: None,
-                    auto_enable: true,
-                });
-            }
-            ScopeOp::Duplicate { row } => {
-                let Some(c) = self.personas.get(row) else {
-                    return;
-                };
-                let src_text = match &c.persona.source {
-                    None => match builtin_source(&c.persona.name) {
-                        Some(t) => t.to_string(),
-                        None => return,
-                    },
-                    Some(p) => match std::fs::read_to_string(p) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            self.notice = Some(format!("{}: {e}", p.display()));
-                            return;
-                        }
-                    },
-                };
-                let slug = unique_slug(&format!("{}-copy", c.persona.name), &self.taken_slugs(dir));
-                let text = match rewrite_frontmatter_name(&src_text, &slug) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.notice = Some(format!("cannot rewrite name: {e}"));
-                        return;
-                    }
-                };
-                let path = dir.join(format!("{slug}.md"));
-                // Same guard as ScopeOp::New: re-check the exact path before
-                // writing.
-                if path.exists() {
-                    self.notice = Some(format!(
-                        "{} already exists — not overwriting",
-                        path.display()
-                    ));
-                    return;
-                }
-                if let Err(e) = std::fs::write(&path, text) {
-                    self.notice = Some(format!("cannot write {}: {e}", path.display()));
-                    return;
-                }
-                self.pending_editor = Some(EditorRequest {
-                    path,
-                    created: true,
-                    persona_name: slug,
-                    prior_enabled: None,
-                    auto_enable: true,
-                });
-            }
-        }
-    }
-
-    /// Post-edit pipeline: cleanup on cancelled creates, rename to match the
-    /// frontmatter name, reload, then reapply identity by PATH (never by
-    /// name — the user may have renamed in the same round-trip).
     pub(crate) fn on_editor_return(&mut self, req: EditorRequest, exit_ok: bool) {
-        let kind = self.current_kind();
-        if !exit_ok && req.created {
-            let _ = std::fs::remove_file(&req.path);
-            self.rebuild_personas_for(kind);
-            return;
-        }
-
-        // Rename pass: the frontmatter name is authoritative for the stem.
-        let mut path = req.path.clone();
-        let mut parsed: Option<(String, crate::engine::persona::PersonaTarget)> = None;
-        let mut extra_warnings: Vec<String> = Vec::new();
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(p) = crate::engine::persona::parse_persona(&text, false) {
-                let stem = path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if p.name != stem {
-                    let dest = path.with_file_name(format!("{}.md", p.name));
-                    if dest.exists() {
-                        extra_warnings.push(format!(
-                            "{}.md already exists — file kept as {}",
-                            p.name,
-                            path.display()
-                        ));
-                    } else if std::fs::rename(&path, &dest).is_ok() {
-                        path = dest;
-                    }
-                }
-                // Collision warnings, computed against the pre-rebuild rows.
-                if p.name != req.persona_name {
-                    if BUILTIN_SLOTS.contains(&p.name.as_str()) {
-                        extra_warnings.push(format!("{} now shadows the built-in", p.name));
-                    }
-                    if let Some(other) = self.personas.iter().find(|c| {
-                        c.persona.name == p.name
-                            && c.persona.source.as_ref().is_some_and(|s| *s != path)
-                    }) {
-                        extra_warnings.push(format!(
-                            "two personas named {}: {} and {} — load order decides which wins",
-                            p.name,
-                            other
-                                .persona
-                                .source
-                                .as_ref()
-                                .map(|s| s.display().to_string())
-                                .unwrap_or_default(),
-                            path.display(),
-                        ));
-                    }
-                }
-                parsed = Some((p.name, p.target));
-            }
-        }
-
-        self.rebuild_personas_for(kind);
-        self.warnings.extend(extra_warnings);
-
-        // Identity by path: rebuild's by-name preservation missed a renamed
-        // persona, so reapply the flag (or the n/d auto-enable) here.
-        if let Some(idx) = self
-            .personas
-            .iter()
-            .position(|c| c.persona.source.as_deref() == Some(path.as_path()))
-        {
-            if req.auto_enable {
-                self.personas[idx].enabled = true;
-            } else if let Some(en) = req.prior_enabled {
-                self.personas[idx].enabled = en;
-            }
-            self.persona_cursor = idx;
-        } else if let Some(inv) = self.invalid.iter().position(|r| r.path == path) {
-            // The edit broke the file: land on its row so `e` re-opens it.
-            self.persona_cursor = self.personas.len() + inv;
-        } else if let Some((name, target)) = parsed {
-            // Parsed fine but filtered out: target drift.
-            let now = match target {
-                crate::engine::persona::PersonaTarget::Code => "code",
-                crate::engine::persona::PersonaTarget::Spec => "spec",
-                crate::engine::persona::PersonaTarget::Both => "both",
-            };
-            self.warnings
-                .push(format!("{name} now targets {now} — hidden for this run"));
-        }
+        self.mgr.on_editor_return(req, exit_ok);
     }
 
     fn move_edit_cursor(&mut self, delta: i32) {
         match self.field {
             Field::Reviewers => {
                 let last = self.row_count().saturating_sub(1) as i32;
-                self.persona_cursor = (self.persona_cursor as i32 + delta).clamp(0, last) as usize;
+                self.mgr.cursor = (self.mgr.cursor as i32 + delta).clamp(0, last) as usize;
             }
             Field::Target => {
                 let last = self.targets.len() as i32; // the spec-files row
@@ -986,7 +468,7 @@ impl ComposerState {
             self.error = Some("select at least one spec file \u{2014} edit target".into());
             return None;
         }
-        if self.personas.iter().filter(|c| c.enabled).count() < 2 {
+        if self.mgr.personas.iter().filter(|c| c.enabled).count() < 2 {
             self.error = Some("need at least 2 reviewers".into());
             return None;
         }
@@ -1253,7 +735,7 @@ fn reviewer_value_spans(state: &ComposerState, theme: &Theme, budget: usize) -> 
     if budget == 0 {
         return Vec::new();
     }
-    let enabled: Vec<&PersonaChoice> = state.personas.iter().filter(|c| c.enabled).collect();
+    let enabled: Vec<&PersonaChoice> = state.mgr.personas.iter().filter(|c| c.enabled).collect();
     let width_for = |m: usize| -> usize {
         let names: usize = enabled[..m]
             .iter()
@@ -1292,8 +774,8 @@ fn reviewer_value_spans(state: &ComposerState, theme: &Theme, budget: usize) -> 
 }
 
 fn reviewers_description(state: &ComposerState) -> String {
-    let enabled = state.personas.iter().filter(|c| c.enabled).count();
-    format!("{enabled} of {} personas on", state.personas.len())
+    let enabled = state.mgr.personas.iter().filter(|c| c.enabled).count();
+    format!("{enabled} of {} personas on", state.mgr.personas.len())
 }
 
 fn model_value(state: &ComposerState) -> String {
@@ -1367,64 +849,6 @@ fn description_line(
     ])
 }
 
-fn provenance_tag(state: &ComposerState, p: &Persona) -> String {
-    let Some(path) = &p.source else {
-        return "built-in".to_string();
-    };
-    let dir = source_dir_label(state, path);
-    if BUILTIN_SLOTS.contains(&p.name.as_str()) {
-        format!("edited ({dir})")
-    } else {
-        dir.to_string()
-    }
-}
-
-fn invalid_tag(state: &ComposerState, path: &Path) -> String {
-    format!("invalid ({})", source_dir_label(state, path))
-}
-
-/// `project` when the file lives under `<root>/.reviewal/personas`, else
-/// `global` — a pure path predicate so tests need no env vars.
-fn source_dir_label(state: &ComposerState, path: &Path) -> &'static str {
-    if path.starts_with(state.root.join(".reviewal").join("personas")) {
-        "project"
-    } else {
-        "global"
-    }
-}
-
-/// Only project-source rows need the stat: a loaded GLOBAL-source row can
-/// never be shadowed by a project file, since `load_custom` lets later dirs
-/// win. Stats the injected `global_persona_dir`, never ambient env.
-fn shadows_global_copy(state: &ComposerState, p: &Persona) -> bool {
-    if !BUILTIN_SLOTS.contains(&p.name.as_str()) {
-        return false;
-    }
-    let Some(source) = &p.source else {
-        return false;
-    };
-    if !source.starts_with(state.root.join(".reviewal").join("personas")) {
-        return false;
-    }
-    state
-        .global_persona_dir
-        .as_ref()
-        .is_some_and(|d| d.join(format!("{}.md", p.name)).is_file())
-}
-
-/// `global_copy_exists` must already be gated to project-source,
-/// builtin-slot rows by [`shadows_global_copy`]; this function stays pure so
-/// it can be unit-tested without touching the filesystem or environment.
-fn armed_delete_label(name: &str, global_copy_exists: bool) -> String {
-    if global_copy_exists {
-        format!("again reveals the global copy of {name} \u{2014} any other key cancels")
-    } else if BUILTIN_SLOTS.contains(&name) {
-        format!("again resets {name} to built-in \u{2014} any other key cancels")
-    } else {
-        format!("again deletes {name} \u{2014} any other key cancels")
-    }
-}
-
 fn reviewer_expansion(state: &ComposerState, theme: &Theme, budget: usize) -> Vec<Line<'static>> {
     // marker(3) + space + name column(12, truncate-enforced — `{:<12}` only
     // pads a short name, it never shrinks a long one) + "— "(2): everything
@@ -1432,13 +856,13 @@ fn reviewer_expansion(state: &ComposerState, theme: &Theme, budget: usize) -> Ve
     const PREFIX: usize = 3 + 1 + 12 + 2;
     const TAG_GUTTER: usize = 2;
     let mut lines: Vec<Line<'static>> = state
-        .personas
+        .mgr.personas
         .iter()
         .enumerate()
         .map(|(i, c)| {
             let marker = if c.enabled { "[x]" } else { "[ ]" };
             let name = truncate_end(&c.persona.name, 12);
-            let tag = provenance_tag(state, &c.persona);
+            let tag = provenance_tag(&state.mgr, &c.persona);
             let lens_budget = budget.saturating_sub(PREFIX + tag.width() + TAG_GUTTER);
             let lens = truncate_end(&c.persona.lens, lens_budget);
             // Right-align the tag; the lens is what truncates, so the tag
@@ -1447,7 +871,7 @@ fn reviewer_expansion(state: &ComposerState, theme: &Theme, budget: usize) -> Ve
                 .saturating_sub(PREFIX + lens.width() + tag.width())
                 .max(TAG_GUTTER);
             let mut spans = vec![Span::raw(" ".repeat(VALUE_COL))];
-            if state.persona_cursor == i {
+            if state.mgr.cursor == i {
                 spans.push(Span::styled(
                     format!("{marker} {name:<12}\u{2014} {lens}{}{tag}", " ".repeat(pad)),
                     Style::default()
@@ -1473,15 +897,15 @@ fn reviewer_expansion(state: &ComposerState, theme: &Theme, budget: usize) -> Ve
             Line::from(spans)
         })
         .collect();
-    for (j, row) in state.invalid.iter().enumerate() {
-        let i = state.personas.len() + j;
+    for (j, row) in state.mgr.invalid.iter().enumerate() {
+        let i = state.mgr.personas.len() + j;
         let stem = row
             .path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let stem = truncate_end(&stem, 12);
-        let tag = invalid_tag(state, &row.path);
+        let tag = invalid_tag(&state.mgr, &row.path);
         let lens_budget = budget.saturating_sub(PREFIX + tag.width() + TAG_GUTTER);
         let err = truncate_end(&row.error, lens_budget);
         let pad = budget
@@ -1489,7 +913,7 @@ fn reviewer_expansion(state: &ComposerState, theme: &Theme, budget: usize) -> Ve
             .max(TAG_GUTTER);
         let body = format!(" !  {stem:<12}\u{2014} {err}{}{tag}", " ".repeat(pad));
         let mut spans = vec![Span::raw(" ".repeat(VALUE_COL))];
-        if state.persona_cursor == i {
+        if state.mgr.cursor == i {
             spans.push(Span::styled(
                 body,
                 Style::default()
@@ -1740,14 +1164,14 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, state: &ComposerState, theme: &The
             Paragraph::new(err.as_str()).style(Style::default().fg(theme.error)),
             error_area,
         );
-    } else if let Some(n) = &state.notice {
+    } else if let Some(n) = &state.mgr.notice {
         f.render_widget(
             Paragraph::new(n.as_str()).style(Style::default().fg(theme.severity_warning)),
             error_area,
         );
-    } else if !state.warnings.is_empty() {
+    } else if !state.mgr.warnings.is_empty() {
         f.render_widget(
-            Paragraph::new(state.warnings.join("; "))
+            Paragraph::new(state.mgr.warnings.join("; "))
                 .style(Style::default().fg(theme.severity_warning))
                 .wrap(Wrap { trim: false }),
             error_area,
@@ -1765,13 +1189,13 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, state: &ComposerState, theme: &The
     } else if state.editing {
         match state.field {
             Field::Reviewers => {
-                if let Some(armed) = state.armed_delete {
-                    let label = if let Some(c) = state.personas.get(armed) {
-                        armed_delete_label(&c.persona.name, state.armed_delete_shadows_global)
+                if let Some(armed) = state.mgr.armed_delete {
+                    let label = if let Some(c) = state.mgr.personas.get(armed) {
+                        armed_delete_label(&c.persona.name, state.mgr.armed_delete_shadows_global)
                     } else {
                         let stem = state
-                            .invalid
-                            .get(armed.saturating_sub(state.personas.len()))
+                            .mgr.invalid
+                            .get(armed.saturating_sub(state.mgr.personas.len()))
                             .and_then(|r| {
                                 r.path.file_stem().map(|s| s.to_string_lossy().into_owned())
                             })
@@ -1815,7 +1239,7 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, state: &ComposerState, theme: &The
 }
 
 fn draw_pager(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) {
-    let Some(p) = &state.pager else { return };
+    let Some(p) = &state.mgr.pager else { return };
     let rect = crate::ui::overlay::centered(area, 80, area.height.saturating_sub(4).max(5));
     f.render_widget(Clear, rect);
     let block = theme
@@ -1835,7 +1259,7 @@ fn draw_pager(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) {
 }
 
 fn draw_scope(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) {
-    let Some(op) = &state.scope_prompt else {
+    let Some(op) = &state.mgr.scope_prompt else {
         return;
     };
     let title = match op {
@@ -1844,7 +1268,7 @@ fn draw_scope(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) {
         ScopeOp::Duplicate { row } => format!(
             "copy {} to:",
             state
-                .personas
+                .mgr.personas
                 .get(*row)
                 .map(|c| c.persona.name.as_str())
                 .unwrap_or("persona")
@@ -1991,7 +1415,7 @@ mod tests {
         c.handle_key(key(' ')); // open checklist
         c.handle_key(key(' ')); // toggle first persona off
         c.handle_key(key_code(KeyCode::Esc));
-        let disabled = c.personas.iter().filter(|p| !p.enabled).count();
+        let disabled = c.mgr.personas.iter().filter(|p| !p.enabled).count();
         assert_eq!(disabled, 1);
 
         c.field = Field::Target;
@@ -2002,7 +1426,7 @@ mod tests {
         assert!(!c.editing, "selecting a target closes the editor");
         assert_eq!(c.target_choice, Some(1));
         assert_eq!(
-            c.personas.iter().filter(|p| !p.enabled).count(),
+            c.mgr.personas.iter().filter(|p| !p.enabled).count(),
             1,
             "diff→diff keeps reviewer choices"
         );
@@ -2033,7 +1457,7 @@ mod tests {
         c.handle_key(key(' ')); // toggle cursored (first) persona off
         c.handle_key(key_code(KeyCode::Esc)); // close the editor
         let disabled: Vec<String> = c
-            .personas
+            .mgr.personas
             .iter()
             .filter(|p| !p.enabled)
             .map(|p| p.persona.name.clone())
@@ -2041,7 +1465,7 @@ mod tests {
         assert!(!disabled.is_empty(), "the toggle must have taken effect");
         c.handle_key(key('t'));
         let still_disabled: Vec<String> = c
-            .personas
+            .mgr.personas
             .iter()
             .filter(|p| !p.enabled)
             .map(|p| p.persona.name.clone())
@@ -2058,13 +1482,13 @@ mod tests {
         let mut c = ComposerState::new(&root, &Config::default(), None, false);
         c.field = Field::Reviewers;
         c.handle_key(key(' ')); // open the reviewer editor
-        let n = c.personas.len();
+        let n = c.mgr.personas.len();
         assert!(n >= 2, "fixture must ship at least 2 builtins to disable");
         for i in 1..n {
-            c.persona_cursor = i;
+            c.mgr.cursor = i;
             c.handle_key(key(' '));
         }
-        assert_eq!(c.personas.iter().filter(|p| p.enabled).count(), 1);
+        assert_eq!(c.mgr.personas.iter().filter(|p| p.enabled).count(), 1);
         c.handle_key(key_code(KeyCode::Enter)); // close the editor
         assert!(
             !c.editing,
@@ -2318,15 +1742,15 @@ mod tests {
             Field::Reviewers,
             "k at the top must not leak to the target field"
         );
-        assert_eq!(c.persona_cursor, 0);
+        assert_eq!(c.mgr.cursor, 0);
         c.handle_key(key('j'));
-        assert_eq!(c.persona_cursor, 1);
+        assert_eq!(c.mgr.cursor, 1);
         for _ in 0..10 {
             c.handle_key(key('j'));
         }
         assert_eq!(
-            c.persona_cursor,
-            c.personas.len() - 1,
+            c.mgr.cursor,
+            c.mgr.personas.len() - 1,
             "j clamps at the last reviewer"
         );
         assert_eq!(
@@ -2413,7 +1837,7 @@ mod tests {
     fn many_reviewers_degrade_to_whole_names_plus_count() {
         let (root, _g) = repo_with_uncommitted_change();
         let mut c = ComposerState::new(&root, &Config::default(), None, false);
-        for p in c.personas.iter_mut() {
+        for p in c.mgr.personas.iter_mut() {
             p.enabled = true;
         }
         // width 40 → 38 inner → 22-column value budget: three builtin names
@@ -2533,11 +1957,11 @@ mod tests {
         .unwrap();
         let c = ComposerState::new(dir.path(), &Config::default(), None, false);
         assert!(
-            c.warnings
+            c.mgr.warnings
                 .iter()
                 .any(|w| w.contains("bad") && w.contains("blurple")),
             "warnings: {:?}",
-            c.warnings
+            c.mgr.warnings
         );
     }
 
@@ -2560,7 +1984,7 @@ mod tests {
 
         let c = ComposerState::new(dir.path(), &Config::default(), None, false);
         let prover = c
-            .personas
+            .mgr.personas
             .iter()
             .find(|p| p.persona.name == "prover")
             .unwrap();
@@ -2573,7 +1997,7 @@ mod tests {
             "a custom persona shadowing a builtin stays default-ON"
         );
         let newbie = c
-            .personas
+            .mgr.personas
             .iter()
             .find(|p| p.persona.name == "newbie")
             .unwrap();
@@ -2672,12 +2096,12 @@ mod tests {
         std::fs::write(pdir.join("broken.md"), "not a persona").unwrap();
         let c = ComposerState::new(dir.path(), &Config::default(), None, false);
         assert_eq!(
-            c.invalid.len(),
+            c.mgr.invalid.len(),
             1,
             "broken file surfaces on load, not only after an edit"
         );
-        assert_eq!(c.row_count(), c.personas.len() + 1);
-        assert!(c.warnings.iter().any(|w| w.contains("broken.md")));
+        assert_eq!(c.row_count(), c.mgr.personas.len() + 1);
+        assert!(c.mgr.warnings.iter().any(|w| w.contains("broken.md")));
     }
 
     #[test]
@@ -2701,21 +2125,21 @@ mod tests {
 
         let tag_of = |name: &str| {
             let p = &c
-                .personas
+                .mgr.personas
                 .iter()
                 .find(|x| x.persona.name == name)
                 .unwrap()
                 .persona;
-            provenance_tag(&c, p)
+            provenance_tag(&c.mgr, p)
         };
         assert_eq!(tag_of("advocate"), "built-in");
         assert_eq!(tag_of("skeptic"), "edited (project)");
         assert_eq!(tag_of("novel"), "project");
-        assert_eq!(invalid_tag(&c, &c.invalid[0].path), "invalid (project)");
+        assert_eq!(invalid_tag(&c.mgr, &c.mgr.invalid[0].path), "invalid (project)");
 
         // Global variants are pure functions of the path — no env needed.
         let mut p = c
-            .personas
+            .mgr.personas
             .iter()
             .find(|x| x.persona.name == "novel")
             .unwrap()
@@ -2724,9 +2148,9 @@ mod tests {
         p.source = Some(std::path::PathBuf::from(
             "/somewhere/global/personas/novel.md",
         ));
-        assert_eq!(provenance_tag(&c, &p), "global");
+        assert_eq!(provenance_tag(&c.mgr, &p), "global");
         p.name = "skeptic".into();
-        assert_eq!(provenance_tag(&c, &p), "edited (global)");
+        assert_eq!(provenance_tag(&c.mgr, &p), "edited (global)");
     }
 
     #[test]
@@ -2748,10 +2172,10 @@ mod tests {
         assert!(text.contains("invalid (project)"), "invalid row tagged");
 
         let last = c.row_count() - 1;
-        c.persona_cursor = last;
-        let before: Vec<bool> = c.personas.iter().map(|p| p.enabled).collect();
+        c.mgr.cursor = last;
+        let before: Vec<bool> = c.mgr.personas.iter().map(|p| p.enabled).collect();
         c.handle_key(crate::ui::test_keys::key(' '));
-        let after: Vec<bool> = c.personas.iter().map(|p| p.enabled).collect();
+        let after: Vec<bool> = c.mgr.personas.iter().map(|p| p.enabled).collect();
         assert_eq!(before, after, "space on an invalid row toggles nothing");
     }
 
@@ -2761,10 +2185,10 @@ mod tests {
         let mut c = ComposerState::new(dir.path(), &Config::default(), None, false);
         c.field = Field::Reviewers;
         c.editing = true;
-        c.persona_cursor = 0;
+        c.mgr.cursor = 0;
         c.handle_key(crate::ui::test_keys::key('v'));
-        let pager = c.pager.as_ref().expect("pager opens");
-        let name = c.personas[0].persona.name.clone();
+        let pager = c.mgr.pager.as_ref().expect("pager opens");
+        let name = c.mgr.personas[0].persona.name.clone();
         assert!(pager.title.contains(&name));
         assert_eq!(
             pager.text,
@@ -2776,9 +2200,9 @@ mod tests {
             "viewing never writes"
         );
         c.handle_key(crate::ui::test_keys::key('j'));
-        assert_eq!(c.pager.as_ref().unwrap().scroll, 1);
+        assert_eq!(c.mgr.pager.as_ref().unwrap().scroll, 1);
         c.handle_key(crate::ui::test_keys::key_code(KeyCode::Esc));
-        assert!(c.pager.is_none());
+        assert!(c.mgr.pager.is_none());
         assert!(c.editing, "esc closed the pager, not the checklist");
     }
 
@@ -2786,8 +2210,8 @@ mod tests {
     fn reviewers_editor_opens_when_empty_and_hints_adapt() {
         let dir = tempfile::tempdir().unwrap();
         let mut c = ComposerState::new(dir.path(), &Config::default(), None, false);
-        c.personas.clear();
-        c.invalid.clear();
+        c.mgr.personas.clear();
+        c.mgr.invalid.clear();
         c.field = Field::Reviewers;
         c.handle_key(crate::ui::test_keys::key_code(KeyCode::Enter));
         assert!(c.editing, "guard relaxed: empty checklist still opens");
@@ -2867,15 +2291,15 @@ mod tests {
         .unwrap();
         let mut c = reviewers_editing(dir.path());
         let i = c
-            .personas
+            .mgr.personas
             .iter()
             .position(|p| p.persona.name == "mine")
             .unwrap();
-        c.persona_cursor = i;
-        c.personas[i].enabled = true;
+        c.mgr.cursor = i;
+        c.mgr.personas[i].enabled = true;
         c.handle_key(crate::ui::test_keys::key('e'));
-        assert!(c.scope_prompt.is_none(), "existing file: no [p]/[g] prompt");
-        let req = c.pending_editor.as_ref().expect("request staged");
+        assert!(c.mgr.scope_prompt.is_none(), "existing file: no [p]/[g] prompt");
+        let req = c.mgr.pending_editor.as_ref().expect("request staged");
         assert_eq!(req.path, pdir.join("mine.md"));
         assert!(!req.created, "edit of an existing file never marks created");
         assert_eq!(req.prior_enabled, Some(true));
@@ -2886,10 +2310,10 @@ mod tests {
     fn e_on_builtin_materializes_via_scope_prompt_created_true_only_when_written() {
         let dir = tempfile::tempdir().unwrap();
         let mut c = reviewers_editing(dir.path());
-        let name = c.personas[0].persona.name.clone();
+        let name = c.mgr.personas[0].persona.name.clone();
         c.handle_key(crate::ui::test_keys::key('e'));
         assert!(
-            matches!(c.scope_prompt, Some(ScopeOp::Materialize { .. })),
+            matches!(c.mgr.scope_prompt, Some(ScopeOp::Materialize { .. })),
             "builtin prompts for scope"
         );
         c.handle_key(crate::ui::test_keys::key('p'));
@@ -2897,7 +2321,7 @@ mod tests {
             .path()
             .join(".reviewal/personas")
             .join(format!("{name}.md"));
-        let req = c.pending_editor.take().expect("request staged");
+        let req = c.mgr.pending_editor.take().expect("request staged");
         assert_eq!(req.path, path);
         assert!(req.created, "fresh materialize wrote the file");
         assert_eq!(
@@ -2909,20 +2333,20 @@ mod tests {
         // Second materialize onto the now-existing file: opened as-is, NOT
         // rewritten, and created must be false.
         std::fs::write(&path, "user edits, currently broken").unwrap();
-        c.scope_prompt = None;
-        c.persona_cursor = 0;
+        c.mgr.scope_prompt = None;
+        c.mgr.cursor = 0;
         // Rebuild happens naturally in the app; simulate by finding the builtin row again.
         let mut c2 = reviewers_editing(dir.path());
         // The file shadows but is broken → builtin row is back; e on it → prompt → p.
         let bi = c2
-            .personas
+            .mgr.personas
             .iter()
             .position(|p| p.persona.name == name && p.persona.builtin);
         if let Some(bi) = bi {
-            c2.persona_cursor = bi;
+            c2.mgr.cursor = bi;
             c2.handle_key(crate::ui::test_keys::key('e'));
             c2.handle_key(crate::ui::test_keys::key('p'));
-            let req2 = c2.pending_editor.take().expect("request staged");
+            let req2 = c2.mgr.pending_editor.take().expect("request staged");
             assert!(
                 !req2.created,
                 "materialize onto an existing file must stage created: false"
@@ -2949,9 +2373,9 @@ mod tests {
         .unwrap();
         let mut c = reviewers_editing(dir.path());
         c.handle_key(crate::ui::test_keys::key('n'));
-        assert!(matches!(c.scope_prompt, Some(ScopeOp::New)));
+        assert!(matches!(c.mgr.scope_prompt, Some(ScopeOp::New)));
         c.handle_key(crate::ui::test_keys::key('p'));
-        let req = c.pending_editor.take().unwrap();
+        let req = c.mgr.pending_editor.take().unwrap();
         assert_eq!(
             req.persona_name, "new-persona-2",
             "slug deduped against the existing file"
@@ -2965,12 +2389,12 @@ mod tests {
         );
 
         // Duplicate a builtin.
-        let bi = c.personas.iter().position(|p| p.persona.builtin).unwrap();
-        c.persona_cursor = bi;
-        let base = c.personas[bi].persona.name.clone();
+        let bi = c.mgr.personas.iter().position(|p| p.persona.builtin).unwrap();
+        c.mgr.cursor = bi;
+        let base = c.mgr.personas[bi].persona.name.clone();
         c.handle_key(crate::ui::test_keys::key('d'));
         c.handle_key(crate::ui::test_keys::key('p'));
-        let req = c.pending_editor.take().unwrap();
+        let req = c.mgr.pending_editor.take().unwrap();
         assert_eq!(req.persona_name, format!("{base}-copy"));
         assert!(req.created && req.auto_enable);
         let copy = crate::engine::persona::parse_persona(
@@ -2987,7 +2411,7 @@ mod tests {
         let mut c = reviewers_editing(dir.path());
         c.handle_key(crate::ui::test_keys::key('n'));
         c.handle_key(crate::ui::test_keys::key_code(KeyCode::Esc));
-        assert!(c.scope_prompt.is_none() && c.pending_editor.is_none());
+        assert!(c.mgr.scope_prompt.is_none() && c.mgr.pending_editor.is_none());
         assert!(
             !dir.path().join(".reviewal/personas").exists(),
             "nothing written on cancel"
@@ -3067,17 +2491,17 @@ mod tests {
         assert!(!path.exists(), "file renamed to match frontmatter");
         assert!(pdir.join("redteam.md").exists());
         let row = c
-            .personas
+            .mgr.personas
             .iter()
             .find(|x| x.persona.name == "redteam")
             .expect("loaded");
         assert!(row.enabled, "auto-enable lands on the post-rename persona");
         let idx = c
-            .personas
+            .mgr.personas
             .iter()
             .position(|x| x.persona.name == "redteam")
             .unwrap();
-        assert_eq!(c.persona_cursor, idx, "cursor follows the edited persona");
+        assert_eq!(c.mgr.cursor, idx, "cursor follows the edited persona");
     }
 
     #[test]
@@ -3109,9 +2533,9 @@ mod tests {
         );
         assert!(mine.exists(), "taken.md exists → mine.md keeps its stem");
         assert!(
-            c.warnings.iter().any(|w| w.contains("taken")),
+            c.mgr.warnings.iter().any(|w| w.contains("taken")),
             "warning names the collision: {:?}",
-            c.warnings
+            c.mgr.warnings
         );
     }
 
@@ -3149,11 +2573,11 @@ mod tests {
             true,
         );
         assert!(
-            c.warnings
+            c.mgr.warnings
                 .iter()
                 .any(|w| w.contains("codey") && w.contains("hidden")),
             "{:?}",
-            c.warnings
+            c.mgr.warnings
         );
 
         // Edit breaks the file → cursor lands on its invalid row.
@@ -3169,13 +2593,13 @@ mod tests {
             true,
         );
         let inv = c
-            .invalid
+            .mgr.invalid
             .iter()
             .position(|r| r.path == path)
             .expect("invalid row built");
         assert_eq!(
-            c.persona_cursor,
-            c.personas.len() + inv,
+            c.mgr.cursor,
+            c.mgr.personas.len() + inv,
             "cursor on the broken row so e re-opens it"
         );
     }
@@ -3192,21 +2616,21 @@ mod tests {
         .unwrap();
         let mut c = reviewers_editing(dir.path());
         let i = c
-            .personas
+            .mgr.personas
             .iter()
             .position(|p| p.persona.name == "skeptic")
             .unwrap();
-        assert!(!c.personas[i].persona.builtin, "custom file shadows");
-        c.persona_cursor = i;
+        assert!(!c.mgr.personas[i].persona.builtin, "custom file shadows");
+        c.mgr.cursor = i;
         c.handle_key(crate::ui::test_keys::key('x'));
-        assert_eq!(c.armed_delete, Some(i));
+        assert_eq!(c.mgr.armed_delete, Some(i));
         let theme = crate::ui::theme::Theme::default();
         let text = crate::ui::app::render_to_text(120, 40, |f| draw(f, f.area(), &c, &theme));
         assert!(text.contains("reset") && text.contains("skeptic"), "{text}");
         c.handle_key(crate::ui::test_keys::key('x'));
         assert!(!pdir.join("skeptic.md").exists(), "file deleted");
         let back = c
-            .personas
+            .mgr.personas
             .iter()
             .find(|p| p.persona.name == "skeptic")
             .unwrap();
@@ -3220,36 +2644,36 @@ mod tests {
         std::fs::create_dir_all(&pdir).unwrap();
         std::fs::write(pdir.join("zz.md"), "junk").unwrap(); // deletable invalid row
         let mut c = reviewers_editing(dir.path());
-        c.persona_cursor = c.row_count() - 1; // the invalid row
+        c.mgr.cursor = c.row_count() - 1; // the invalid row
         c.handle_key(crate::ui::test_keys::key('x'));
-        assert!(c.armed_delete.is_some());
+        assert!(c.mgr.armed_delete.is_some());
         c.handle_key(crate::ui::test_keys::key_code(KeyCode::Esc));
-        assert!(c.armed_delete.is_none(), "esc disarms");
+        assert!(c.mgr.armed_delete.is_none(), "esc disarms");
         assert!(c.editing, "…and is consumed: the checklist did NOT close");
 
         c.handle_key(crate::ui::test_keys::key('x'));
-        let before = c.persona_cursor;
+        let before = c.mgr.cursor;
         c.handle_key(crate::ui::test_keys::key('k'));
-        assert!(c.armed_delete.is_none());
-        assert_eq!(c.persona_cursor, before - 1, "k still moved the cursor");
+        assert!(c.mgr.armed_delete.is_none());
+        assert_eq!(c.mgr.cursor, before - 1, "k still moved the cursor");
 
         // Confirm deletes the broken file.
-        c.persona_cursor = c.row_count() - 1;
+        c.mgr.cursor = c.row_count() - 1;
         c.handle_key(crate::ui::test_keys::key('x'));
         c.handle_key(crate::ui::test_keys::key('x'));
         assert!(!pdir.join("zz.md").exists());
-        assert!(c.invalid.is_empty());
+        assert!(c.mgr.invalid.is_empty());
     }
 
     #[test]
     fn x_on_pure_builtin_is_a_noop_with_notice() {
         let dir = tempfile::tempdir().unwrap();
         let mut c = reviewers_editing(dir.path());
-        c.persona_cursor = 0;
+        c.mgr.cursor = 0;
         c.handle_key(crate::ui::test_keys::key('x'));
-        assert!(c.armed_delete.is_none());
+        assert!(c.mgr.armed_delete.is_none());
         assert_eq!(
-            c.notice.as_deref(),
+            c.mgr.notice.as_deref(),
             Some("built-in \u{2014} e edits a copy")
         );
     }
@@ -3275,11 +2699,11 @@ mod tests {
         .unwrap();
         let c = ComposerState::new(dir.path(), &config_with_global(global.path()), None, false);
         let row = c
-            .personas
+            .mgr.personas
             .iter()
             .find(|p| p.persona.name == "housekeeper")
             .expect("persona from the injected global dir is loaded");
-        assert_eq!(provenance_tag(&c, &row.persona), "global");
+        assert_eq!(provenance_tag(&c.mgr, &row.persona), "global");
     }
 
     #[test]
@@ -3291,7 +2715,7 @@ mod tests {
         c.editing = true;
         c.handle_key(crate::ui::test_keys::key('n'));
         c.handle_key(crate::ui::test_keys::key('g'));
-        let req = c.pending_editor.take().expect("template staged");
+        let req = c.mgr.pending_editor.take().expect("template staged");
         assert!(
             req.path.starts_with(global.path()),
             "written under the injected global dir, not ambient env: {}",
@@ -3314,12 +2738,12 @@ mod tests {
         c.field = Field::Reviewers;
         c.editing = true;
         let i = c
-            .personas
+            .mgr.personas
             .iter()
             .position(|p| p.persona.name == "skeptic")
             .unwrap();
         assert!(
-            c.personas[i]
+            c.mgr.personas[i]
                 .persona
                 .source
                 .as_ref()
@@ -3327,10 +2751,10 @@ mod tests {
                 .starts_with(&pdir),
             "project file wins the load over the global copy"
         );
-        c.persona_cursor = i;
+        c.mgr.cursor = i;
         c.handle_key(crate::ui::test_keys::key('x'));
         assert!(
-            c.armed_delete_shadows_global,
+            c.mgr.armed_delete_shadows_global,
             "arm_delete's real stat found the global copy via the injected dir"
         );
     }
@@ -3363,14 +2787,14 @@ mod tests {
         .unwrap();
         let mut c = reviewers_editing(dir.path());
         let i = c
-            .personas
+            .mgr.personas
             .iter()
             .position(|p| p.persona.name == "skeptic")
             .unwrap();
-        c.persona_cursor = i;
+        c.mgr.cursor = i;
         c.handle_key(crate::ui::test_keys::key('x'));
-        assert_eq!(c.armed_delete, Some(i), "Option<usize> shape unchanged");
-        c.armed_delete_shadows_global = true; // forced, not fs-derived
+        assert_eq!(c.mgr.armed_delete, Some(i), "Option<usize> shape unchanged");
+        c.mgr.armed_delete_shadows_global = true; // forced, not fs-derived
 
         let theme = crate::ui::theme::Theme::default();
         let text = crate::ui::app::render_to_text(120, 40, |f| draw(f, f.area(), &c, &theme));
@@ -3393,15 +2817,15 @@ mod tests {
         .unwrap();
         let mut c = reviewers_editing(dir.path());
         let i = c
-            .personas
+            .mgr.personas
             .iter()
             .position(|p| p.persona.name == "novel")
             .unwrap();
-        c.persona_cursor = i;
+        c.mgr.cursor = i;
         c.handle_key(crate::ui::test_keys::key('x'));
-        assert_eq!(c.armed_delete, Some(i));
+        assert_eq!(c.mgr.armed_delete, Some(i));
         assert!(
-            !c.armed_delete_shadows_global,
+            !c.mgr.armed_delete_shadows_global,
             "novel isn't a builtin slot at all"
         );
 

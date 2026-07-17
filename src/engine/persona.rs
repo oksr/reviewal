@@ -256,13 +256,20 @@ pub fn available(
     kind: TargetKind,
     custom_dirs: &[PathBuf],
 ) -> (Vec<Persona>, Vec<PersonaLoadError>) {
+    let (mut personas, failures) = available_all(custom_dirs);
+    personas.retain(|p| p.target.matches(kind));
+    (personas, failures)
+}
+
+/// The whole library, no target filter — builtins merged with custom dirs,
+/// later dirs winning on name collision. Backs the home personas tab.
+pub fn available_all(custom_dirs: &[PathBuf]) -> (Vec<Persona>, Vec<PersonaLoadError>) {
     let (custom, failures) = load_custom(custom_dirs);
     let mut personas = builtins();
     for c in custom {
         personas.retain(|p| p.name != c.name);
         personas.push(c);
     }
-    personas.retain(|p| p.target.matches(kind));
     (personas, failures)
 }
 

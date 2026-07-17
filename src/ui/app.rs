@@ -148,6 +148,31 @@ pub(crate) struct App {
 }
 
 impl App {
+    /// The persona manager owned by the current screen, if any — the
+    /// composer's checklist or the home personas tab.
+    fn persona_mgr(&mut self) -> Option<&mut crate::ui::personas::PersonaManager> {
+        match &mut self.screen {
+            Screen::Composer(state) => Some(&mut state.mgr),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn take_pending_editor(&mut self) -> Option<crate::ui::personas::EditorRequest> {
+        self.persona_mgr().and_then(|m| m.pending_editor.take())
+    }
+
+    pub(crate) fn editor_returned(&mut self, req: crate::ui::personas::EditorRequest, ok: bool) {
+        if let Some(m) = self.persona_mgr() {
+            m.on_editor_return(req, ok);
+        }
+    }
+
+    pub(crate) fn set_editor_notice(&mut self, msg: String) {
+        if let Some(m) = self.persona_mgr() {
+            m.notice = Some(msg);
+        }
+    }
+
     pub(crate) fn try_new(
         root: PathBuf,
         config: crate::config::Config,
