@@ -120,11 +120,7 @@ impl PickerState {
     }
 }
 
-pub(crate) use crate::ui::personas::{
-    armed_delete_label, invalid_tag, provenance_tag, PersonaChoice, PersonaManager,
-};
-#[cfg(test)]
-pub(crate) use crate::ui::personas::{EditorRequest, ScopeOp};
+use crate::ui::personas::{invalid_tag, provenance_tag, PersonaChoice, PersonaManager};
 
 pub(crate) struct ComposerState {
     root: PathBuf,
@@ -292,12 +288,7 @@ impl ComposerState {
         if self.picker.is_some() {
             return self.handle_picker_key(key);
         }
-        if self.mgr.pager.is_some() {
-            self.mgr.handle_pager_key(key);
-            return None;
-        }
-        if self.mgr.scope_prompt.is_some() {
-            self.mgr.handle_scope_key(key);
+        if self.mgr.route_key(key) {
             return None;
         }
         if self.model_input {
@@ -365,11 +356,6 @@ impl ComposerState {
     /// field); Enter and Esc both close the editor — toggles applied inside
     /// it stick either way.
     fn handle_edit_key(&mut self, key: KeyEvent) -> Option<Transition> {
-        // Armed-delete grammar: x confirms; esc is consumed and only
-        // disarms; any other key disarms and then acts normally.
-        if self.mgr.handle_armed_key(key) {
-            return None;
-        }
         match key.code {
             KeyCode::Char('v' | 'e' | 'n' | 'd' | 'x') if self.field == Field::Reviewers => {
                 self.mgr.handle_verb_key(key);
@@ -402,11 +388,6 @@ impl ComposerState {
             _ => {}
         }
         None
-    }
-
-    #[cfg(test)]
-    pub(crate) fn on_editor_return(&mut self, req: EditorRequest, exit_ok: bool) {
-        self.mgr.on_editor_return(req, exit_ok);
     }
 
     fn move_edit_cursor(&mut self, delta: i32) {
@@ -1191,22 +1172,7 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, state: &ComposerState, theme: &The
     } else if state.editing {
         match state.field {
             Field::Reviewers => {
-                if let Some(armed) = state.mgr.armed_delete {
-                    let label = if let Some(c) = state.mgr.personas.get(armed) {
-                        armed_delete_label(&c.persona.name, state.mgr.armed_delete_shadows_global)
-                    } else {
-                        let stem = state
-                            .mgr
-                            .invalid
-                            .get(armed.saturating_sub(state.mgr.personas.len()))
-                            .and_then(|r| {
-                                r.path.file_stem().map(|s| s.to_string_lossy().into_owned())
-                            })
-                            .unwrap_or_default();
-                        format!(
-                            "again deletes broken file {stem}.md \u{2014} any other key cancels"
-                        )
-                    };
+                if let Some(label) = state.mgr.armed_footer_label() {
                     theme.hints(&[("x", label.as_str())])
                 } else if state.row_count() == 0 {
                     theme.hints(&[("n", "new"), ("enter", "done")])
@@ -1253,6 +1219,7 @@ fn draw_scope(f: &mut Frame, area: Rect, state: &ComposerState, theme: &Theme) {
 mod tests {
     use super::*;
     use crate::ui::app::render_to_text;
+    use crate::ui::personas::{armed_delete_label, EditorRequest, ScopeOp};
     use crate::ui::test_keys::{key, key_code};
     use std::fs;
     use tempfile::TempDir;
@@ -2405,7 +2372,7 @@ mod tests {
         let mut c = reviewers_editing(dir.path());
 
         // created:false (materialize-onto-existing / plain edit) → file survives :cq
-        c.on_editor_return(
+        c.mgr.on_editor_return(
             EditorRequest {
                 path: pre_existing.clone(),
                 created: false,
@@ -2427,7 +2394,7 @@ mod tests {
             "+++\nname = \"fresh\"\ntitle = \"F\"\nlens = \"l\"\ntarget = \"both\"\n+++\nb",
         )
         .unwrap();
-        c.on_editor_return(
+        c.mgr.on_editor_return(
             EditorRequest {
                 path: fresh.clone(),
                 created: true,
@@ -2454,7 +2421,7 @@ mod tests {
             "+++\nname = \"redteam\"\ntitle = \"R\"\nlens = \"l\"\ntarget = \"both\"\n+++\nb",
         )
         .unwrap();
-        c.on_editor_return(
+        c.mgr.on_editor_return(
             EditorRequest {
                 path: path.clone(),
                 created: true,
@@ -2499,7 +2466,7 @@ mod tests {
         )
         .unwrap();
         let mut c = reviewers_editing(dir.path());
-        c.on_editor_return(
+        c.mgr.on_editor_return(
             EditorRequest {
                 path: mine.clone(),
                 created: false,
@@ -2540,7 +2507,7 @@ mod tests {
             "+++\nname = \"codey\"\ntitle = \"C\"\nlens = \"l\"\ntarget = \"code\"\n+++\nb",
         )
         .unwrap();
-        c.on_editor_return(
+        c.mgr.on_editor_return(
             EditorRequest {
                 path: path.clone(),
                 created: false,
@@ -2561,7 +2528,7 @@ mod tests {
 
         // Edit breaks the file → cursor lands on its invalid row.
         std::fs::write(&path, "no longer a persona").unwrap();
-        c.on_editor_return(
+        c.mgr.on_editor_return(
             EditorRequest {
                 path: path.clone(),
                 created: false,

@@ -113,11 +113,6 @@ fn home_screen(
 ) -> Screen {
     let (runs, mut store_warnings) = store.list_runs();
     warnings.append(&mut store_warnings);
-    let dirs = config.persona_dirs(app_root);
-    let (code_personas, _) =
-        crate::engine::persona::available(crate::engine::model::TargetKind::Code, &dirs);
-    let (spec_personas, _) =
-        crate::engine::persona::available(crate::engine::model::TargetKind::Spec, &dirs);
     Screen::Home(crate::ui::home::HomeState {
         targets: crate::engine::target::detect_targets(app_root),
         spec_count: crate::ui::composer::collect_spec_files(app_root).len(),
@@ -128,8 +123,6 @@ fn home_screen(
         personas: crate::ui::personas::PersonaManager::new(app_root, config, None),
         warnings,
         skill_installed: crate::skill::ingest_skill_installed(app_root),
-        defaults_code: code_personas.iter().map(|p| p.name.clone()).collect(),
-        defaults_spec: spec_personas.iter().map(|p| p.name.clone()).collect(),
         show_help: false,
     })
 }
@@ -159,13 +152,30 @@ impl App {
         }
     }
 
+    /// INVARIANT (with [`editor_returned`](Self::editor_returned)): the
+    /// screen that staged the request is still current on return — `run_tui`
+    /// drains in the same loop iteration, and no persona verb both stages a
+    /// request and returns a screen transition.
     pub(crate) fn take_pending_editor(&mut self) -> Option<crate::ui::personas::EditorRequest> {
         self.persona_mgr().and_then(|m| m.pending_editor.take())
     }
 
+    /// See [`take_pending_editor`](Self::take_pending_editor)'s invariant;
+    /// the `None` arm still deletes a staging-created file so a cancelled
+    /// `n`/`d` can't leave an orphan persona.
     pub(crate) fn editor_returned(&mut self, req: crate::ui::personas::EditorRequest, ok: bool) {
-        if let Some(m) = self.persona_mgr() {
-            m.on_editor_return(req, ok);
+        match self.persona_mgr() {
+            Some(m) => m.on_editor_return(req, ok),
+            None => {
+                debug_assert!(
+                    false,
+                    "editor request for {} returned with no owning screen",
+                    req.path.display()
+                );
+                if req.created {
+                    let _ = std::fs::remove_file(&req.path);
+                }
+            }
         }
     }
 
@@ -413,7 +423,7 @@ impl App {
                     target,
                     personas,
                     model: self.config.model.clone(),
-                    cross_review: false,
+                    cross_review: crate::ui::home::QUICK_START_CROSS_REVIEW,
                     timeout_secs: self.config.timeout_secs,
                     claude_bin: self.config.claude_bin.clone(),
                     now_utc: now_rfc3339(),

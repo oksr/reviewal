@@ -175,6 +175,23 @@ impl PersonaManager {
         self.cursor = (self.cursor as i32 + delta).clamp(0, last) as usize;
     }
 
+    /// The routing preamble both persona surfaces run before their own
+    /// keys: notice, pager, scope prompt, armed-delete — in that order;
+    /// the armed grammar must see any other key so it can disarm before
+    /// the wrapper acts on it. Returns `true` when the key was consumed.
+    pub(crate) fn route_key(&mut self, key: KeyEvent) -> bool {
+        self.notice = None;
+        if self.pager.is_some() {
+            self.handle_pager_key(key);
+            return true;
+        }
+        if self.scope_prompt.is_some() {
+            self.handle_scope_key(key);
+            return true;
+        }
+        self.handle_armed_key(key)
+    }
+
     /// Pager scroll/close keys. Call only while `pager` is open; always
     /// consumes the key.
     pub(crate) fn handle_pager_key(&mut self, key: KeyEvent) {
@@ -211,9 +228,8 @@ impl PersonaManager {
     }
 
     /// The management verbs (`v` view, `e` edit, `n` new, `d` duplicate,
-    /// `x` delete). Returns `true` when the key was one of them; wrappers
-    /// gate the call on their own context first.
-    pub(crate) fn handle_verb_key(&mut self, key: KeyEvent) -> bool {
+    /// `x` delete); wrappers gate the call on their own context first.
+    pub(crate) fn handle_verb_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('v') => self.open_pager(),
             KeyCode::Char('e') => self.begin_edit(),
@@ -224,9 +240,53 @@ impl PersonaManager {
                 }
             }
             KeyCode::Char('x') => self.arm_delete(),
-            _ => return false,
+            _ => {}
         }
-        true
+    }
+
+    /// The armed-delete footer text; both surfaces render this so a layout
+    /// change cannot leave one of them naming the wrong file mid-delete.
+    pub(crate) fn armed_footer_label(&self) -> Option<String> {
+        let armed = self.armed_delete?;
+        if let Some(c) = self.personas.get(armed) {
+            return Some(armed_delete_label(
+                &c.persona.name,
+                self.armed_delete_shadows_global,
+            ));
+        }
+        let stem = self
+            .invalid
+            .get(armed.saturating_sub(self.personas.len()))
+            .and_then(|r| r.path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        Some(format!(
+            "again deletes broken file {stem}.md — any other key cancels"
+        ))
+    }
+
+    /// Guards reads/edits of rows sourced from the repo-controlled project
+    /// dir: a hostile repo can commit a symlink there pointing anywhere
+    /// (`leak.md -> ~/.aws/credentials`), and following it would page or
+    /// $EDITOR-open the target. Global-dir rows are exempt — that dir is
+    /// user-owned, and dotfiles managers legitimately symlink into it.
+    /// Returns `false` (and sets the notice) when the path must not be used.
+    fn guard_project_symlink(&mut self, path: &Path) -> bool {
+        let project_dir = self.root.join(".reviewal").join("personas");
+        if !path.starts_with(&project_dir) {
+            return true;
+        }
+        let (Ok(resolved), Ok(dir)) = (path.canonicalize(), project_dir.canonicalize()) else {
+            // Unreadable paths fail later with their own IO error.
+            return true;
+        };
+        if resolved.starts_with(&dir) {
+            return true;
+        }
+        self.notice = Some(format!(
+            "{}: symlink escapes the project persona dir — not followed",
+            path.display()
+        ));
+        false
     }
 
     /// Read-only source of the highlighted row — builtin embedded text or
@@ -234,41 +294,32 @@ impl PersonaManager {
     pub(crate) fn open_pager(&mut self) {
         let i = self.cursor;
         let (title, text) = if let Some(c) = self.personas.get(i) {
-            let text = match &c.persona.source {
-                None => match crate::engine::persona::builtin_source(&c.persona.name) {
-                    Some(t) => t.to_string(),
+            let source = c.persona.source.clone();
+            let title = format!(
+                "{} \u{2014} {}",
+                c.persona.name,
+                provenance_tag(self, &c.persona)
+            );
+            let text = match source {
+                None => {
+                    let name = self.personas[i].persona.name.clone();
+                    match crate::engine::persona::builtin_source(&name) {
+                        Some(t) => t.to_string(),
+                        None => return,
+                    }
+                }
+                Some(path) => match self.guarded_read(&path) {
+                    Some(t) => t,
                     None => return,
                 },
-                Some(path) => match std::fs::read_to_string(path) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.notice = Some(format!("{}: {e}", path.display()));
-                        return;
-                    }
-                },
             };
-            (
-                format!(
-                    "{} \u{2014} {}",
-                    c.persona.name,
-                    provenance_tag(self, &c.persona)
-                ),
-                text,
-            )
+            (title, text)
         } else if let Some(row) = self.invalid.get(i.saturating_sub(self.personas.len())) {
-            match std::fs::read_to_string(&row.path) {
-                Ok(t) => (
-                    format!(
-                        "{} \u{2014} {}",
-                        row.path.display(),
-                        invalid_tag(self, &row.path)
-                    ),
-                    t,
-                ),
-                Err(e) => {
-                    self.notice = Some(format!("{}: {e}", row.path.display()));
-                    return;
-                }
+            let path = row.path.clone();
+            let title = format!("{} \u{2014} {}", path.display(), invalid_tag(self, &path));
+            match self.guarded_read(&path) {
+                Some(t) => (title, t),
+                None => return,
             }
         } else {
             return;
@@ -280,6 +331,21 @@ impl PersonaManager {
         });
     }
 
+    /// [`guard_project_symlink`](Self::guard_project_symlink) + read, with
+    /// IO errors landing in the notice.
+    fn guarded_read(&mut self, path: &Path) -> Option<String> {
+        if !self.guard_project_symlink(path) {
+            return None;
+        }
+        match std::fs::read_to_string(path) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                self.notice = Some(format!("{}: {e}", path.display()));
+                None
+            }
+        }
+    }
+
     /// `e`: existing files open directly; a builtin prompts for scope and
     /// materializes (write-if-absent) once a directory is chosen.
     pub(crate) fn begin_edit(&mut self) {
@@ -287,11 +353,15 @@ impl PersonaManager {
         if let Some(c) = self.personas.get(i) {
             match &c.persona.source {
                 Some(path) => {
+                    let (path, name, enabled) = (path.clone(), c.persona.name.clone(), c.enabled);
+                    if !self.guard_project_symlink(&path) {
+                        return;
+                    }
                     self.pending_editor = Some(EditorRequest {
-                        path: path.clone(),
+                        path,
                         created: false,
-                        persona_name: c.persona.name.clone(),
-                        prior_enabled: Some(c.enabled),
+                        persona_name: name,
+                        prior_enabled: Some(enabled),
                         auto_enable: false,
                     });
                 }
@@ -302,13 +372,16 @@ impl PersonaManager {
                 }
             }
         } else if let Some(row) = self.invalid.get(i.saturating_sub(self.personas.len())) {
-            let stem = row
-                .path
+            let path = row.path.clone();
+            let stem = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            if !self.guard_project_symlink(&path) {
+                return;
+            }
             self.pending_editor = Some(EditorRequest {
-                path: row.path.clone(),
+                path,
                 created: false,
                 persona_name: stem,
                 prior_enabled: None,
@@ -478,20 +551,18 @@ impl PersonaManager {
                 let Some(c) = self.personas.get(row) else {
                     return;
                 };
-                let src_text = match &c.persona.source {
-                    None => match builtin_source(&c.persona.name) {
+                let (src_path, src_name) = (c.persona.source.clone(), c.persona.name.clone());
+                let src_text = match src_path {
+                    None => match builtin_source(&src_name) {
                         Some(t) => t.to_string(),
                         None => return,
                     },
-                    Some(p) => match std::fs::read_to_string(p) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            self.notice = Some(format!("{}: {e}", p.display()));
-                            return;
-                        }
+                    Some(p) => match self.guarded_read(&p) {
+                        Some(t) => t,
+                        None => return,
                     },
                 };
-                let slug = unique_slug(&format!("{}-copy", c.persona.name), &self.taken_slugs(dir));
+                let slug = unique_slug(&format!("{src_name}-copy"), &self.taken_slugs(dir));
                 let text = match rewrite_frontmatter_name(&src_text, &slug) {
                     Ok(t) => t,
                     Err(e) => {
@@ -535,6 +606,8 @@ impl PersonaManager {
         }
 
         // Rename pass: the frontmatter name is authoritative for the stem.
+        // Using it as a filename is safe because parse_persona rejects
+        // anything outside [a-z0-9-_] — see parse_persona_rejects_unsafe_name.
         let mut path = req.path.clone();
         let mut parsed: Option<(String, crate::engine::persona::PersonaTarget)> = None;
         let mut extra_warnings: Vec<String> = Vec::new();
@@ -603,13 +676,12 @@ impl PersonaManager {
             self.cursor = self.personas.len() + inv;
         } else if let Some((name, target)) = parsed {
             // Parsed fine but filtered out of this view: target drift.
-            let now = match target {
-                crate::engine::persona::PersonaTarget::Code => "code",
-                crate::engine::persona::PersonaTarget::Spec => "spec",
-                crate::engine::persona::PersonaTarget::Both => "both",
-            };
-            self.warnings
-                .push(format!("{name} now targets {now} — hidden for this run"));
+            if self.filter.is_some() {
+                self.warnings.push(format!(
+                    "{name} now targets {} — hidden for this run",
+                    target.label()
+                ));
+            }
         }
     }
 }
@@ -632,7 +704,7 @@ pub(crate) fn invalid_tag(mgr: &PersonaManager, path: &Path) -> String {
 
 /// `project` when the file lives under `<root>/.reviewal/personas`, else
 /// `global` — a pure path predicate so tests need no env vars.
-fn source_dir_label(mgr: &PersonaManager, path: &Path) -> &'static str {
+pub(crate) fn source_dir_label(mgr: &PersonaManager, path: &Path) -> &'static str {
     if path.starts_with(mgr.root.join(".reviewal").join("personas")) {
         "project"
     } else {

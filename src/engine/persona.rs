@@ -11,6 +11,14 @@ pub enum PersonaTarget {
 }
 
 impl PersonaTarget {
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            PersonaTarget::Code => "code",
+            PersonaTarget::Spec => "spec",
+            PersonaTarget::Both => "both",
+        }
+    }
+
     pub(crate) fn matches(&self, kind: TargetKind) -> bool {
         matches!(
             (self, kind),

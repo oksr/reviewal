@@ -9,6 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HomeTab {
@@ -41,10 +42,12 @@ pub(crate) struct HomeState {
     pub personas: PersonaManager,
     pub warnings: Vec<String>,
     pub skill_installed: bool,
-    pub defaults_code: Vec<String>,
-    pub defaults_spec: Vec<String>,
     pub show_help: bool,
 }
+
+/// Quick-start never cross-reviews; the start tab's detail line derives its
+/// text from this same value so the two cannot diverge.
+pub(crate) const QUICK_START_CROSS_REVIEW: bool = false;
 
 fn help_entries(tab: HomeTab) -> &'static [(&'static str, &'static str)] {
     match tab {
@@ -87,21 +90,8 @@ impl HomeState {
             self.show_help = false;
             return None;
         }
-        if self.tab == HomeTab::Personas {
-            // Same one-shot notice and overlay routing as the composer's
-            // checklist, so the two persona surfaces feel identical.
-            self.personas.notice = None;
-            if self.personas.pager.is_some() {
-                self.personas.handle_pager_key(key);
-                return None;
-            }
-            if self.personas.scope_prompt.is_some() {
-                self.personas.handle_scope_key(key);
-                return None;
-            }
-            if self.personas.handle_armed_key(key) {
-                return None;
-            }
+        if self.tab == HomeTab::Personas && self.personas.route_key(key) {
+            return None;
         }
         match key.code {
             KeyCode::Char('q') => return Some(Transition::Quit),
@@ -254,7 +244,7 @@ pub(crate) fn draw(
     model_label: &str,
     theme: &Theme,
 ) {
-    let warn_height = state.warnings.len() as u16;
+    let warn_height = (state.warnings.len() + state.personas.warnings.len()) as u16;
     let tip_height = u16::from(!state.skill_installed);
 
     // Every tab hugs its content, capped by the space above the footer —
@@ -265,8 +255,13 @@ pub(crate) fn draw(
     let avail = area.height.saturating_sub(fixed).max(3);
     let content_height = match state.tab {
         HomeTab::Start => {
+            let empty = state.targets.is_empty() && state.spec_count == 0;
             let selected_is_diff = state.launcher_idx < state.targets.len();
-            let detail_lines = 1 + u16::from(selected_is_diff); // personas line (+ files line)
+            let detail_lines = if empty {
+                0
+            } else {
+                1 + u16::from(selected_is_diff)
+            };
             ((state.targets.len() + 1).max(1) as u16 + 2 + detail_lines).min(avail)
         }
         HomeTab::Personas => (state.personas.row_count().max(1) as u16 + 2).min(avail),
@@ -310,10 +305,11 @@ pub(crate) fn draw(
             tip,
         );
     }
-    if !state.warnings.is_empty() {
+    if warn_height > 0 {
         let lines: Vec<Line> = state
             .warnings
             .iter()
+            .chain(state.personas.warnings.iter())
             .map(|w| Line::styled(w.clone(), Style::default().fg(theme.severity_warning)))
             .collect();
         f.render_widget(Paragraph::new(lines), warn_area);
@@ -414,9 +410,9 @@ fn selectable_row(
     }
     const SUFFIX: &str = "enter starts with defaults";
     let width = width as usize;
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    if used + 1 + SUFFIX.chars().count() <= width {
-        spans.push(Span::raw(" ".repeat(width - used - SUFFIX.chars().count())));
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    if used + 1 + SUFFIX.width() <= width {
+        spans.push(Span::raw(" ".repeat(width - used - SUFFIX.width())));
         spans.push(Span::styled(SUFFIX, theme.dim_style()));
     } else if width > used {
         spans.push(Span::raw(" ".repeat(width - used)));
@@ -434,22 +430,46 @@ fn selectable_row(
 /// cross-review default — a dim footnote inside the box, under the row it
 /// describes.
 fn launch_detail_line(state: &HomeState, is_spec_row: bool, theme: &Theme) -> Line<'static> {
-    let names = if is_spec_row {
-        &state.defaults_spec
+    let kind = if is_spec_row {
+        crate::engine::model::TargetKind::Spec
     } else {
-        &state.defaults_code
+        crate::engine::model::TargetKind::Code
     };
     let mut spans = vec![Span::styled("    personas: ", theme.dim_style())];
-    for (i, name) in names.iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+    for c in state
+        .personas
+        .personas
+        .iter()
+        .filter(|c| c.persona.target.matches(kind))
+    {
+        if !first {
             spans.push(Span::styled(" · ", theme.dim_style()));
         }
+        first = false;
         spans.push(Span::styled(
-            name.clone(),
-            Style::default().fg(theme.persona_color(name, None)),
+            c.persona.name.clone(),
+            Style::default().fg(theme.persona_color(&c.persona.name, c.persona.color.as_deref())),
         ));
+        if let Some(path) = &c.persona.source {
+            spans.push(Span::styled(
+                format!(
+                    " ({})",
+                    crate::ui::personas::source_dir_label(&state.personas, path)
+                ),
+                theme.dim_style(),
+            ));
+        }
     }
-    spans.push(Span::styled(" · cross-review off", theme.dim_style()));
+    let cr = if QUICK_START_CROSS_REVIEW {
+        "on"
+    } else {
+        "off"
+    };
+    spans.push(Span::styled(
+        format!(" · cross-review {cr}"),
+        theme.dim_style(),
+    ));
     Line::from(spans)
 }
 
@@ -512,13 +532,10 @@ fn draw_personas(f: &mut Frame, inner: Rect, state: &HomeState, theme: &Theme) {
     for (i, c) in mgr.personas.iter().enumerate() {
         let selected = mgr.cursor == i;
         let name = crate::ui::format::truncate_end(&c.persona.name, NAME_COLS - 2);
-        let target = match c.persona.target {
-            crate::engine::persona::PersonaTarget::Code => "code",
-            crate::engine::persona::PersonaTarget::Spec => "spec",
-            crate::engine::persona::PersonaTarget::Both => "both",
-        };
+        let target = c.persona.target.label();
         let tag = provenance_tag(mgr, &c.persona);
         let color = theme.persona_color(&c.persona.name, c.persona.color.as_deref());
+        let name_pad = " ".repeat(NAME_COLS.saturating_sub(name.width()));
         let mut spans = vec![
             if selected {
                 Span::styled(
@@ -530,15 +547,15 @@ fn draw_personas(f: &mut Frame, inner: Rect, state: &HomeState, theme: &Theme) {
             } else {
                 Span::raw("  ")
             },
-            Span::styled(format!("{name:<NAME_COLS$}"), Style::default().fg(color)),
+            Span::styled(format!("{name}{name_pad}"), Style::default().fg(color)),
             Span::styled(format!("{target:<6}"), theme.dim_style()),
         ];
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let used: usize = spans.iter().map(|s| s.content.width()).sum();
         let avail = (inner.width as usize)
             .saturating_sub(used)
-            .saturating_sub(tag.chars().count() + 2);
+            .saturating_sub(tag.width() + 2);
         let lens = crate::ui::format::truncate_end(&c.persona.lens, avail);
-        let pad = avail.saturating_sub(lens.chars().count()) + 2;
+        let pad = avail.saturating_sub(lens.width()) + 2;
         spans.push(Span::styled(lens, theme.dim_style()));
         spans.push(Span::styled(
             format!("{}{tag}", " ".repeat(pad)),
@@ -558,16 +575,19 @@ fn draw_personas(f: &mut Frame, inner: Rect, state: &HomeState, theme: &Theme) {
         let tag = invalid_tag(mgr, &row.path);
         let err_avail = (inner.width as usize)
             .saturating_sub(2 + NAME_COLS + 6)
-            .saturating_sub(tag.chars().count() + 2);
+            .saturating_sub(tag.width() + 2);
         let err = crate::ui::format::truncate_end(&row.error, err_avail);
-        let pad = err_avail.saturating_sub(err.chars().count()) + 2;
+        let pad = err_avail.saturating_sub(err.width()) + 2;
         let spans = vec![
             Span::styled(
                 if selected { "\u{276f} " } else { "! " }.to_string(),
                 Style::default().fg(theme.error),
             ),
             Span::styled(
-                format!("{stem:<NAME_COLS$}"),
+                format!(
+                    "{stem}{}",
+                    " ".repeat(NAME_COLS.saturating_sub(stem.width()))
+                ),
                 Style::default().fg(theme.error),
             ),
             Span::styled(format!("{:<6}", "—"), Style::default().fg(theme.error)),
@@ -579,7 +599,9 @@ fn draw_personas(f: &mut Frame, inner: Rect, state: &HomeState, theme: &Theme) {
     if lines.is_empty() {
         lines.push(Line::styled("no personas found", theme.dim_style()));
     }
-    f.render_widget(Paragraph::new(lines), inner);
+    let visible = inner.height as usize;
+    let scroll = (mgr.cursor + 1).saturating_sub(visible) as u16;
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
 /// Pads a roster row to the box width and applies the selection tint.
@@ -592,7 +614,7 @@ fn finish_roster_row(
     if !selected {
         return Line::from(spans);
     }
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
     if (width as usize) > used {
         spans.push(Span::raw(" ".repeat(width as usize - used)));
     }
@@ -660,16 +682,17 @@ fn draw_history(f: &mut Frame, inner: Rect, state: &HomeState, theme: &Theme) {
                 },
                 Span::styled(format!("{rel:<11}"), theme.dim_style()),
                 Span::styled(format!("{kind:<6}"), theme.dim_style()),
-                Span::styled(
-                    format!("{:<width$}", target_text(r), width = TARGET_COLS + 2),
-                    target_style,
-                ),
+                {
+                    let target = target_text(r);
+                    let pad = " ".repeat((TARGET_COLS + 2).saturating_sub(target.width()));
+                    Span::styled(format!("{target}{pad}"), target_style)
+                },
             ];
-            let prefix_cols: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let prefix_cols: usize = spans.iter().map(|s| s.content.width()).sum();
             let avail = (inner.width as usize).saturating_sub(prefix_cols);
             spans.extend(status_cell(r, theme, avail));
             if selected {
-                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                let used: usize = spans.iter().map(|s| s.content.width()).sum();
                 if (inner.width as usize) > used {
                     spans.push(Span::raw(" ".repeat(inner.width as usize - used)));
                 }
@@ -918,8 +941,6 @@ mod tests {
             history_idx: 0,
             warnings: vec![],
             skill_installed: true,
-            defaults_code: vec!["prover".into(), "breaker".into(), "steward".into()],
-            defaults_spec: vec!["prover".into(), "skeptic".into(), "advocate".into()],
             show_help: false,
         }
     }
@@ -1158,7 +1179,8 @@ mod tests {
     #[test]
     fn start_tab_box_hugs_content_and_history_tab_fills() {
         // Start tab: spec row + its personas detail line + borders = 4 rows.
-        let s = history_fixture_state();
+        let mut s = history_fixture_state();
+        s.spec_count = 5;
         let text = render_to_text(94, 40, |f| {
             draw(f, f.area(), &s, &ClaudeCheck::Ok, "opus", &Theme::default())
         });
@@ -1175,6 +1197,34 @@ mod tests {
             bottom - top,
             3,
             "content-fit, not a frame to the footer: {text}"
+        );
+
+        // The empty state renders one message line and reserves no phantom
+        // detail row: a 3-row box.
+        let empty = state_with(vec![], vec![]);
+        let text = render_to_text(94, 40, |f| {
+            draw(
+                f,
+                f.area(),
+                &empty,
+                &ClaudeCheck::Ok,
+                "opus",
+                &Theme::default(),
+            )
+        });
+        let lines: Vec<&str> = text.lines().collect();
+        let top = lines
+            .iter()
+            .position(|l| l.contains("start a review"))
+            .expect("tab bar rendered");
+        let bottom = lines
+            .iter()
+            .rposition(|l| l.contains('\u{2570}'))
+            .expect("bottom border rendered");
+        assert_eq!(
+            bottom - top,
+            2,
+            "no reserved detail line when empty: {text}"
         );
 
         // History tab hugs too: two runs → a 4-row box; a history taller
@@ -1337,6 +1387,124 @@ mod tests {
         assert!(
             !dir.join("redteam.md").exists(),
             "second x deletes the file"
+        );
+    }
+
+    #[test]
+    fn start_tab_detail_line_tracks_live_persona_edits() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".reviewal/personas");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("redteam.md"),
+            "+++\nname = \"redteam\"\ntitle = \"Red Team\"\nlens = \"attack\"\ntarget = \"code\"\n+++\nbody",
+        )
+        .unwrap();
+        let mut s = state_with(vec![detected_head_target()], vec![]);
+        s.personas = PersonaManager::new(root.path(), &crate::config::Config::default(), None);
+        let text = render_to_text(110, 30, |f| {
+            draw(f, f.area(), &s, &ClaudeCheck::Ok, "opus", &Theme::default())
+        });
+        assert!(
+            text.contains("redteam (project)"),
+            "custom persona listed with provenance: {text}"
+        );
+
+        // Delete it from the personas tab; the start tab must notice.
+        s.tab = HomeTab::Personas;
+        let row = s
+            .personas
+            .personas
+            .iter()
+            .position(|c| c.persona.name == "redteam")
+            .unwrap();
+        s.personas.cursor = row;
+        s.handle_key(key('x'));
+        s.handle_key(key('x'));
+        s.tab = HomeTab::Start;
+        let text = render_to_text(110, 30, |f| {
+            draw(f, f.area(), &s, &ClaudeCheck::Ok, "opus", &Theme::default())
+        });
+        assert!(
+            !text.contains("redteam"),
+            "detail line derives from the live manager: {text}"
+        );
+    }
+
+    #[test]
+    fn manager_warnings_render_on_home() {
+        let mut s = state_with(vec![], vec![]);
+        s.personas.warnings = vec!["prover now shadows the built-in".into()];
+        let text = render_to_text(100, 30, |f| {
+            draw(f, f.area(), &s, &ClaudeCheck::Ok, "opus", &Theme::default())
+        });
+        assert!(text.contains("prover now shadows the built-in"), "{text}");
+    }
+
+    #[test]
+    fn roster_scrolls_to_keep_cursor_visible() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".reviewal/personas");
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..30 {
+            std::fs::write(
+                dir.join(format!("extra-{i:02}.md")),
+                format!("+++\nname = \"extra-{i:02}\"\ntitle = \"t\"\nlens = \"filler row\"\ntarget = \"both\"\n+++\nbody"),
+            )
+            .unwrap();
+        }
+        let mut s = state_with(vec![], vec![]);
+        s.personas = PersonaManager::new(root.path(), &crate::config::Config::default(), None);
+        s.tab = HomeTab::Personas;
+        let last = s.personas.row_count() - 1;
+        s.personas.cursor = last;
+        let last_name = s.personas.personas[last].persona.name.clone();
+        let text = render_to_text(100, 24, |f| {
+            draw(f, f.area(), &s, &ClaudeCheck::Ok, "opus", &Theme::default())
+        });
+        assert!(
+            text.contains(&last_name),
+            "cursor row visible after scroll: {text}"
+        );
+        assert!(
+            !text.contains("extra-00"),
+            "rows above the window scrolled out: {text}"
+        );
+    }
+
+    #[test]
+    fn project_symlink_is_not_followed_by_view_or_edit() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".reviewal/personas");
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = root.path().join("secret.txt");
+        std::fs::write(&secret, "s3cret").unwrap();
+        std::os::unix::fs::symlink(&secret, dir.join("leak.md")).unwrap();
+        let mut s = state_with(vec![], vec![]);
+        s.personas = PersonaManager::new(root.path(), &crate::config::Config::default(), None);
+        s.tab = HomeTab::Personas;
+        // The symlink target isn't a persona, so it lands in invalid rows.
+        let row = s.personas.personas.len()
+            + s.personas
+                .invalid
+                .iter()
+                .position(|r| r.path.file_name().is_some_and(|n| n == "leak.md"))
+                .expect("symlink surfaces as an invalid row");
+        s.personas.cursor = row;
+        s.handle_key(key('v'));
+        assert!(s.personas.pager.is_none(), "pager must not open the target");
+        s.handle_key(key('e'));
+        assert!(
+            s.personas.pending_editor.is_none(),
+            "editor must not be staged for the target"
+        );
+        assert!(
+            s.personas
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("symlink")),
+            "notice explains why: {:?}",
+            s.personas.notice
         );
     }
 
