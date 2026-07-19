@@ -20,6 +20,10 @@ The live test is guarded by the `REVIEWAL_LIVE` env var (not `#[ignore]`), so pl
 
 When you finish a piece of work the user is going to check by hand, run `cargo install --path .` as the final step so their installed `reviewal` binary matches the working tree — done ≠ delivered until it's installed.
 
+## Comments
+
+Write code without narration: no comments above individual statements or variable declarations restating or justifying what the line does. A comment is warranted only when its absence risks dangerous drift — a cross-module invariant, a security constraint, or a non-obvious "why" the code can't express (point to the test that locks it in when one exists). Function-level `///` docs are fine but stay terse; short intent comments in tests follow the existing style.
+
 ## Architecture
 
 Two halves, bridged by channels:
